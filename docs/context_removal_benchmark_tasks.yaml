@@ -1,0 +1,316 @@
+schema_version: 1
+benchmark_name: ctx-rm-context-removal-coding
+description: >
+  Ten concrete multi-turn benchmark tasks for evaluating context removal in
+  coding agents. Each task injects needle facts or code, specifies eviction
+  pressure patterns, and defines clear success criteria.
+
+tasks:
+  - id: CR-001
+    title: legacy_flag_cascade
+    expected_winner: full_context
+    eviction_pressure: gradual_buildup
+    min_turns: 20
+    repo_fixture: fixtures/legacy_flag_cascade
+    scenario: >
+      Fix a bug in a legacy feature gate. The agent must trace a request flow
+      across multiple modules and preserve an early specification about a flag.
+    needles:
+      - id: N1
+        type: fact
+        injection_turn: 3
+        injection_method: doc_read
+        content: "SAFE_MODE must remain true when LEGACY_AUTH is enabled."
+        risk_if_evicted: "Agent flips SAFE_MODE to false and fails hidden test."
+      - id: N2
+        type: code
+        injection_turn: 7
+        injection_method: file_read
+        content: "config/flags.py contains SAFE_MODE default set to True."
+        risk_if_evicted: "Agent rewrites defaults without realizing dependency."
+    context_injections:
+      - turn: 10
+        type: large_doc_dump
+        size_tokens: 2500
+        description: "Unrelated style guide and changelog."
+    success_criteria:
+      - "Bug fixed without changing SAFE_MODE default."
+      - "Auth flow uses LEGACY_AUTH when enabled."
+    evaluation:
+      - check: file_contains
+        target: src/auth/legacy.py
+        must_include: "if LEGACY_AUTH:"
+      - check: file_equals
+        target: config/flags.py
+        must_preserve: "SAFE_MODE = True"
+
+  - id: CR-002
+    title: migration_order_sensitivity
+    expected_winner: full_context
+    eviction_pressure: interleaved_noise
+    min_turns: 20
+    repo_fixture: fixtures/migration_order_sensitivity
+    scenario: >
+      Fix a failing migration by reordering steps and preserving a one-time
+      data backfill mentioned early in logs.
+    needles:
+      - id: N1
+        type: fact
+        injection_turn: 4
+        injection_method: log_output
+        content: "Backfill MUST run before renaming column 'user_status'."
+        risk_if_evicted: "Backfill runs after rename and crashes."
+    context_injections:
+      - turn: 6
+        type: interleaved_logs
+        size_tokens: 1800
+        description: "Verbose migration debug logs and unrelated warnings."
+    success_criteria:
+      - "Migration passes without data loss."
+      - "Backfill occurs before rename."
+    evaluation:
+      - check: file_contains_in_order
+        target: migrations/0042_fix_status.py
+        must_include_order:
+          - "backfill_user_status"
+          - "rename_column"
+
+  - id: CR-003
+    title: protocol_handshake_sequence
+    expected_winner: full_context
+    eviction_pressure: sudden_injection
+    min_turns: 20
+    repo_fixture: fixtures/protocol_handshake_sequence
+    scenario: >
+      Implement a client handshake. The correct sequence is given early in
+      a short internal note, then a large RFC dump appears later.
+    needles:
+      - id: N1
+        type: fact
+        injection_turn: 2
+        injection_method: internal_note
+        content: "Handshake order: HELLO -> CHALLENGE -> RESPONSE -> READY."
+        risk_if_evicted: "Agent follows RFC ordering and fails integration."
+    context_injections:
+      - turn: 8
+        type: large_rfc_dump
+        size_tokens: 4000
+        description: "Full protocol RFC with alternative flow variants."
+    success_criteria:
+      - "Client sends messages in the internal note sequence."
+      - "Integration test passes."
+    evaluation:
+      - check: file_contains_in_order
+        target: src/client/handshake.py
+        must_include_order:
+          - "send_hello()"
+          - "send_challenge()"
+          - "send_response()"
+          - "send_ready()"
+
+  - id: CR-004
+    title: log_spam_diagnosis
+    expected_winner: removal
+    eviction_pressure: gradual_buildup
+    min_turns: 20
+    repo_fixture: fixtures/log_spam_diagnosis
+    scenario: >
+      Identify a bug hidden in a single stack trace line after massive log spam.
+    needles:
+      - id: N1
+        type: fact
+        injection_turn: 12
+        injection_method: log_output
+        content: "Root cause: NoneType in cache.invalidate at cache.py:214."
+        risk_if_evicted: "Agent fixes wrong module."
+    context_injections:
+      - turn: 4
+        type: noisy_logs
+        size_tokens: 5000
+        description: "Repeated INFO logs and metrics output."
+      - turn: 9
+        type: noisy_logs
+        size_tokens: 3000
+        description: "Retry spam and unrelated warnings."
+    success_criteria:
+      - "Fix targets cache.invalidate null handling."
+      - "No unrelated logging changes."
+    evaluation:
+      - check: file_contains
+        target: src/cache/cache.py
+        must_include: "if entry is None:"
+
+  - id: CR-005
+    title: generated_code_noise
+    expected_winner: removal
+    eviction_pressure: sudden_injection
+    min_turns: 20
+    repo_fixture: fixtures/generated_code_noise
+    scenario: >
+      Fix a bug in a small hand-written adapter while a huge generated file
+      is injected into context.
+    needles:
+      - id: N1
+        type: code
+        injection_turn: 5
+        injection_method: file_read
+        content: "Adapter expects version_tag from metadata['ver_tag']."
+        risk_if_evicted: "Agent uses metadata['version'] and fails."
+    context_injections:
+      - turn: 6
+        type: large_generated_file
+        size_tokens: 6000
+        description: "Auto-generated protobuf with repeated symbols."
+    success_criteria:
+      - "Adapter reads metadata['ver_tag']."
+      - "Generated file remains untouched."
+    evaluation:
+      - check: file_contains
+        target: src/adapter/version_adapter.py
+        must_include: "metadata['ver_tag']"
+
+  - id: CR-006
+    title: dependency_tree_shock
+    expected_winner: removal
+    eviction_pressure: sudden_injection
+    min_turns: 20
+    repo_fixture: fixtures/dependency_tree_shock
+    scenario: >
+      Update a dependency resolution rule. A vendor library dump appears and
+      should be ignored; only a small resolver file is relevant.
+    needles:
+      - id: N1
+        type: fact
+        injection_turn: 3
+        injection_method: issue_note
+        content: "Resolver must prefer local overrides over transitive deps."
+        risk_if_evicted: "Agent updates resolver to prefer transitive deps."
+    context_injections:
+      - turn: 7
+        type: vendor_dump
+        size_tokens: 7000
+        description: "Full dependency tree and lockfile contents."
+    success_criteria:
+      - "Local overrides win over transitive dependencies."
+    evaluation:
+      - check: file_contains
+        target: src/resolve/graph.py
+        must_include: "if is_local_override:"
+
+  - id: CR-007
+    title: alternating_api_clients
+    expected_winner: toss_up
+    eviction_pressure: interleaved_noise
+    min_turns: 20
+    repo_fixture: fixtures/alternating_api_clients
+    scenario: >
+      Two similar API clients exist; the agent must patch the correct one
+      based on a needle in a mid-task comment.
+    needles:
+      - id: N1
+        type: fact
+        injection_turn: 11
+        injection_method: comment_read
+        content: "Use ClientB for production; ClientA is test-only."
+        risk_if_evicted: "Agent patches ClientA instead of ClientB."
+    context_injections:
+      - turn: 8
+        type: interleaved_docs
+        size_tokens: 2500
+        description: "API docs for both clients and example usage."
+    success_criteria:
+      - "Change applied to ClientB only."
+    evaluation:
+      - check: file_contains
+        target: src/clients/client_b.py
+        must_include: "timeout_ms"
+      - check: file_not_contains
+        target: src/clients/client_a.py
+        must_include: "timeout_ms"
+
+  - id: CR-008
+    title: refactor_with_outdated_comments
+    expected_winner: toss_up
+    eviction_pressure: gradual_buildup
+    min_turns: 20
+    repo_fixture: fixtures/refactor_outdated_comments
+    scenario: >
+      Refactor a module while ignoring outdated comments and preserving a
+      hidden performance constraint given in a short benchmark note.
+    needles:
+      - id: N1
+        type: fact
+        injection_turn: 5
+        injection_method: benchmark_note
+        content: "Must keep O(n) memory; avoid building full list."
+        risk_if_evicted: "Agent builds list and violates memory constraint."
+    context_injections:
+      - turn: 9
+        type: outdated_comments
+        size_tokens: 2000
+        description: "Old design notes contradicting current code."
+    success_criteria:
+      - "Refactor avoids materializing full list."
+    evaluation:
+      - check: file_not_contains
+        target: src/refactor/streaming.py
+        must_include: "list("
+
+  - id: CR-009
+    title: test_harness_clue
+    expected_winner: toss_up
+    eviction_pressure: interleaved_noise
+    min_turns: 20
+    repo_fixture: fixtures/test_harness_clue
+    scenario: >
+      Fix a failing test; the only clue is a one-line note in a test harness
+      that is easy to evict.
+    needles:
+      - id: N1
+        type: code
+        injection_turn: 13
+        injection_method: file_read
+        content: "Harness sets ENV=staging; code must read from ENV."
+        risk_if_evicted: "Agent hardcodes production config."
+    context_injections:
+      - turn: 6
+        type: interleaved_logs
+        size_tokens: 3000
+        description: "Verbose test output with flaky warnings."
+    success_criteria:
+      - "Config reads from ENV variable."
+    evaluation:
+      - check: file_contains
+        target: src/config/load.py
+        must_include: "os.getenv('ENV')"
+
+  - id: CR-010
+    title: multi_issue_thread
+    expected_winner: toss_up
+    eviction_pressure: sudden_injection
+    min_turns: 20
+    repo_fixture: fixtures/multi_issue_thread
+    scenario: >
+      Patch a bug where a long issue thread includes conflicting guidance.
+      The correct fix is in a short maintainer reply.
+    needles:
+      - id: N1
+        type: fact
+        injection_turn: 4
+        injection_method: issue_thread
+        content: "Maintainer: prefer retry=3 with exponential backoff."
+        risk_if_evicted: "Agent uses retry=5 and linear backoff."
+    context_injections:
+      - turn: 5
+        type: long_issue_thread
+        size_tokens: 5000
+        description: "Contradictory suggestions and unrelated discussion."
+    success_criteria:
+      - "Retry count is 3 with exponential backoff."
+    evaluation:
+      - check: file_contains
+        target: src/net/retry.py
+        must_include: "retries = 3"
+      - check: file_contains
+        target: src/net/retry.py
+        must_include: "exponential_backoff"
