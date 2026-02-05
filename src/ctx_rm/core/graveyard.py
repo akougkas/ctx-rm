@@ -23,8 +23,10 @@ import time
 from collections import OrderedDict, deque
 from pathlib import Path
 
+import numpy as np
 import structlog
 
+from ctx_rm.core.embedding import EmbeddingProvider, cosine_similarity_batch
 from ctx_rm.core.segment import Segment, Tier
 
 logger = structlog.get_logger()
@@ -91,8 +93,13 @@ class ColdStore:
     metadata-based retrieval. Embedding-based search is pluggable.
     """
 
-    def __init__(self, db_path: Path | str = ":memory:") -> None:
+    def __init__(
+        self,
+        db_path: Path | str = ":memory:",
+        embedding_provider: EmbeddingProvider | None = None,
+    ) -> None:
         self._db_path = str(db_path)
+        self._embedding_provider = embedding_provider
         self._conn = sqlite3.connect(self._db_path)
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
@@ -136,15 +143,33 @@ class ColdStore:
         """)
         self._conn.commit()
 
+        # Embedding columns (idempotent migration)
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(segments)").fetchall()}
+        if "embedding" not in columns:
+            self._conn.execute("ALTER TABLE segments ADD COLUMN embedding BLOB")
+        if "embedding_provider" not in columns:
+            self._conn.execute("ALTER TABLE segments ADD COLUMN embedding_provider TEXT")
+        self._conn.commit()
+
     def persist(self, seg: Segment) -> None:
-        """Write a segment to cold storage."""
+        """Write a segment to cold storage, computing embedding if provider set."""
         seg.tier = Tier.COLD
+
+        embedding_blob = None
+        provider_name = None
+        if self._embedding_provider is not None:
+            vec = self._embedding_provider.embed(seg.content)
+            if np.linalg.norm(vec) > 0:
+                embedding_blob = vec.astype(np.float32).tobytes()
+                provider_name = self._embedding_provider.name
+
         self._conn.execute(
             """INSERT OR REPLACE INTO segments
                (seg_id, content, role, token_count, created_at, evicted_at,
                 last_accessed, access_count, relevance_score, eviction_reason,
-                eviction_policy, source, turn_number, summary, metadata_json, tier)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                eviction_policy, source, turn_number, summary, metadata_json,
+                tier, embedding, embedding_provider)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 seg.seg_id,
                 seg.content,
@@ -162,6 +187,8 @@ class ColdStore:
                 seg.summary,
                 json.dumps(seg.metadata) if seg.metadata else None,
                 Tier.COLD.value,
+                embedding_blob,
+                provider_name,
             ),
         )
         self._conn.commit()
@@ -175,11 +202,14 @@ class ColdStore:
             return None
         return self._row_to_segment(row)
 
-    def search(self, query: str, top_k: int = 5) -> list[Segment]:
-        """Simple keyword search over cold storage.
+    def search(self, query: str, top_k: int = 5, threshold: float = 0.0) -> list[Segment]:
+        """Search cold storage — cosine similarity when embeddings available, keyword LIKE fallback."""
+        if self._embedding_provider is not None:
+            return self._search_by_embedding(query, top_k, threshold)
+        return self._search_by_keyword(query, top_k)
 
-        TODO: Replace with embedding-based vector search for production.
-        """
+    def _search_by_keyword(self, query: str, top_k: int) -> list[Segment]:
+        """Keyword LIKE search — fallback when no embedding provider."""
         rows = self._conn.execute(
             """SELECT * FROM segments
                WHERE archived = 0 AND content LIKE ?
@@ -188,6 +218,52 @@ class ColdStore:
             (f"%{query}%", top_k),
         ).fetchall()
         return [self._row_to_segment(r) for r in rows]
+
+    def _search_by_embedding(
+        self, query: str, top_k: int, threshold: float
+    ) -> list[Segment]:
+        """Cosine similarity search using embedding provider."""
+        query_vec = self._embedding_provider.embed(query)  # type: ignore[union-attr]
+        if np.linalg.norm(query_vec) == 0:
+            return self._search_by_keyword(query, top_k)
+
+        rows = self._conn.execute(
+            """SELECT seg_id, embedding FROM segments
+               WHERE archived = 0 AND embedding IS NOT NULL AND LENGTH(embedding) > 0"""
+        ).fetchall()
+
+        if not rows:
+            return self._search_by_keyword(query, top_k)
+
+        expected_dim = self._embedding_provider.dimensions  # type: ignore[union-attr]
+        seg_ids: list[str] = []
+        embeddings: list[np.ndarray] = []
+        for row in rows:
+            vec = np.frombuffer(row["embedding"], dtype=np.float32)
+            if vec.shape[0] != expected_dim:
+                continue  # dimension mismatch — skip (provider changed or pre-migration)
+            seg_ids.append(row["seg_id"])
+            embeddings.append(vec)
+
+        if not embeddings:
+            return self._search_by_keyword(query, top_k)
+
+        stored_matrix = np.stack(embeddings)
+        similarities = cosine_similarity_batch(query_vec, stored_matrix)
+
+        # Sort by similarity descending, filter by threshold, take top_k
+        ranked = sorted(zip(seg_ids, similarities), key=lambda x: x[1], reverse=True)
+        results: list[Segment] = []
+        for sid, sim in ranked:
+            if sim < threshold:
+                break
+            seg = self.retrieve(sid)
+            if seg is not None:
+                results.append(seg)
+            if len(results) >= top_k:
+                break
+
+        return results
 
     def archive(self, seg_id: str) -> None:
         """Move a segment to graveyard (mark as archived)."""
@@ -303,9 +379,10 @@ class TieredStore:
         warm_max_items: int = 64,
         warm_max_tokens: int = 50_000,
         cold_archive_age: float = 3600.0,  # Archive cold segments after 1 hour
+        embedding_provider: EmbeddingProvider | None = None,
     ) -> None:
         self.warm = WarmCache(max_items=warm_max_items, max_tokens=warm_max_tokens)
-        self.cold = ColdStore(db_path=db_path)
+        self.cold = ColdStore(db_path=db_path, embedding_provider=embedding_provider)
         self.zombie = ZombieQueue()
         self.cold_archive_age = cold_archive_age
 
@@ -353,9 +430,9 @@ class TieredStore:
         logger.debug("recall_miss", seg_id=seg_id)
         return None
 
-    def search(self, query: str, top_k: int = 5) -> list[Segment]:
+    def search(self, query: str, top_k: int = 5, threshold: float = 0.0) -> list[Segment]:
         """Search across cold storage for matching segments."""
-        return self.cold.search(query, top_k=top_k)
+        return self.cold.search(query, top_k=top_k, threshold=threshold)
 
     def get_stats(self) -> dict:
         return {
