@@ -81,13 +81,14 @@ class OllamaScorer(Scorer):
     ) -> None:
         """Score candidates via Ollama, falling back to heuristic on failure."""
         try:
+            coro = self._async_score_batch(candidates, context)
+            loop = asyncio.new_event_loop()
             try:
-                import anyio
-
-                anyio.from_thread.run(self._async_score_batch, candidates, context)
-            except RuntimeError:
-                # No async context available, use asyncio.run directly
-                asyncio.run(self._async_score_batch(candidates, context))
+                loop.run_until_complete(coro)
+            finally:
+                # Ensure coroutine is closed even on exception to avoid warnings
+                coro.close()
+                loop.close()
         except Exception as e:
             logger.debug("ollama_fallback", reason=str(e))
             self._fallback.score_batch(candidates, context)
