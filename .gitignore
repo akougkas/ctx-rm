@@ -210,3 +210,4 @@ __marimo__/
 results/
 *.db
 benchmarks/fixtures/
+.planning/
