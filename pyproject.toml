@@ -53,7 +53,10 @@ dev = [
 embeddings = [
     "sentence-transformers>=5.0",
 ]
-all = ["ctx-rm[gemini,bench,dev,embeddings]"]
+ollama = [
+    "ollama>=0.6",
+]
+all = ["ctx-rm[gemini,bench,dev,embeddings,ollama]"]
 
 [project.scripts]
 ctx-rm = "ctx_rm.cli.main:app"

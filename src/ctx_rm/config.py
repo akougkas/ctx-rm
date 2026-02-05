@@ -41,6 +41,18 @@ class CtxRmConfig(BaseSettings):
     gemini_model: str = Field(default="gemini-2.5-pro", description="Gemini model to use")
     claude_model: str = Field(default="sonnet", description="Claude model to use")
 
+    # LLM Scoring (opt-in)
+    scorer: str = Field(default="heuristic", description="Scorer: heuristic or ollama")
+    ollama_host: str = Field(
+        default="http://localhost:11434", description="Ollama API host"
+    )
+    ollama_model: str | None = Field(
+        default=None, description="Preferred Ollama model (None=auto)"
+    )
+    ollama_max_concurrent: int = Field(
+        default=4, description="Max concurrent Ollama scoring requests"
+    )
+
     # Output
     output_dir: Path = Field(default=Path("./results"), description="Results output directory")
     log_level: str = Field(default="INFO", description="Logging level")
