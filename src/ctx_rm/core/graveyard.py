@@ -203,7 +203,7 @@ class ColdStore:
         return self._row_to_segment(row)
 
     def search(self, query: str, top_k: int = 5, threshold: float = 0.0) -> list[Segment]:
-        """Search cold storage — cosine similarity when embeddings available, keyword LIKE fallback."""
+        """Search cold storage -- cosine similarity or keyword LIKE fallback."""
         if self._embedding_provider is not None:
             return self._search_by_embedding(query, top_k, threshold)
         return self._search_by_keyword(query, top_k)
@@ -252,7 +252,9 @@ class ColdStore:
         similarities = cosine_similarity_batch(query_vec, stored_matrix)
 
         # Sort by similarity descending, filter by threshold, take top_k
-        ranked = sorted(zip(seg_ids, similarities), key=lambda x: x[1], reverse=True)
+        ranked = sorted(
+            zip(seg_ids, similarities, strict=True), key=lambda x: x[1], reverse=True
+        )
         results: list[Segment] = []
         for sid, sim in ranked:
             if sim < threshold:

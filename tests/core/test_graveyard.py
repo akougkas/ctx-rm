@@ -1,5 +1,8 @@
 """Tests for the TieredStore (graveyard architecture)."""
 
+import numpy as np
+
+from ctx_rm.core.embedding import HashingEmbeddingProvider
 from ctx_rm.core.graveyard import ColdStore, TieredStore, WarmCache, ZombieQueue
 from ctx_rm.core.segment import Segment, SegmentRole, Tier
 
@@ -166,3 +169,101 @@ def test_tiered_store_stats():
     stats = store.get_stats()
     assert stats["warm_count"] == 0
     assert stats["cold_count"] == 0
+
+
+# ── ColdStore Embedding Search ────────────────────────────────────────
+
+
+def _make_cold_store_with_embeddings():
+    provider = HashingEmbeddingProvider()
+    return ColdStore(embedding_provider=provider), provider
+
+
+def test_cold_store_persist_stores_embedding():
+    store, provider = _make_cold_store_with_embeddings()
+    seg = _make_seg("python authentication handler")
+    store.persist(seg)
+
+    row = store._conn.execute(
+        "SELECT embedding, embedding_provider FROM segments WHERE seg_id = ?",
+        (seg.seg_id,),
+    ).fetchone()
+
+    assert row["embedding"] is not None
+    assert row["embedding_provider"] == "hashing"
+    vec = np.frombuffer(row["embedding"], dtype=np.float32)
+    assert vec.shape == (256,)
+
+
+def test_cold_store_search_by_embedding_similarity():
+    store, _ = _make_cold_store_with_embeddings()
+    store.persist(_make_seg("python authentication handler"))
+    store.persist(_make_seg("python auth middleware validation"))
+    store.persist(_make_seg("sql database migration schema"))
+
+    results = store.search("python auth")
+    assert len(results) >= 2
+    # Auth-related segments should rank above database migration
+    contents = [r.content for r in results]
+    auth_indices = [i for i, c in enumerate(contents) if "auth" in c]
+    db_indices = [i for i, c in enumerate(contents) if "database" in c or "migration" in c]
+    if db_indices:
+        assert min(auth_indices) < min(db_indices)
+
+
+def test_cold_store_search_fallback_no_provider():
+    store = ColdStore()  # No embedding_provider
+    store.persist(_make_seg("auth handler code"))
+    store.persist(_make_seg("database migration"))
+
+    results = store.search("auth")
+    assert len(results) == 1
+    assert "auth" in results[0].content
+
+
+def test_cold_store_search_threshold_filters():
+    store, _ = _make_cold_store_with_embeddings()
+    store.persist(_make_seg("python authentication handler"))
+    store.persist(_make_seg("python auth middleware validation"))
+    store.persist(_make_seg("sql database migration schema"))
+
+    all_results = store.search("python auth", threshold=0.0)
+    high_threshold_results = store.search("python auth", threshold=0.99)
+    assert len(high_threshold_results) <= len(all_results)
+
+
+def test_cold_store_search_top_k_limits_results():
+    store, _ = _make_cold_store_with_embeddings()
+    for i in range(5):
+        store.persist(_make_seg(f"python auth handler variant {i}"))
+
+    results = store.search("python auth", top_k=2)
+    assert len(results) <= 2
+
+
+def test_cold_store_empty_content_embedding():
+    store, _ = _make_cold_store_with_embeddings()
+    seg = _make_seg("x")
+    # Should not raise
+    store.persist(seg)
+    # Embedding may be NULL for very short/zero-norm content, or may have a value
+    row = store._conn.execute(
+        "SELECT embedding FROM segments WHERE seg_id = ?", (seg.seg_id,)
+    ).fetchone()
+    # Just verify no crash — embedding can be NULL or valid BLOB
+    assert row is not None
+
+
+def test_cold_store_schema_migration_idempotent(tmp_path):
+    db_path = tmp_path / "test.db"
+    provider = HashingEmbeddingProvider()
+
+    store1 = ColdStore(db_path=db_path, embedding_provider=provider)
+    store1.persist(_make_seg("first run"))
+    store1.close()
+
+    # Second open should not error (columns already exist)
+    store2 = ColdStore(db_path=db_path, embedding_provider=provider)
+    store2.persist(_make_seg("second run"))
+    assert store2.count == 2
+    store2.close()
