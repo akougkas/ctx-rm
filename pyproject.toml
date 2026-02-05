@@ -50,7 +50,10 @@ dev = [
     "ruff>=0.9",
     "mypy>=1.14",
 ]
-all = ["ctx-rm[gemini,bench,dev]"]
+embeddings = [
+    "sentence-transformers>=5.0",
+]
+all = ["ctx-rm[gemini,bench,dev,embeddings]"]
 
 [project.scripts]
 ctx-rm = "ctx_rm.cli.main:app"
