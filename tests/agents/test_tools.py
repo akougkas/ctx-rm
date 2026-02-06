@@ -104,6 +104,79 @@ async def test_list_directory_missing(executor) -> None:
 
 
 @pytest.mark.asyncio
+async def test_grep_search(executor, work_dir) -> None:
+    result = await executor.execute("grep_search", {"pattern": "hello", "path": str(work_dir)})
+    assert "hello" in result
+
+
+# ── file_patch ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_file_patch_basic(executor, work_dir) -> None:
+    """Replace unique text in a file."""
+    target = str(work_dir / "hello.py")
+    result = await executor.execute("file_patch", {
+        "path": target,
+        "old_text": "hello world",
+        "new_text": "goodbye world",
+    })
+    assert "patched" in result.lower() or "replaced" in result.lower()
+    assert (work_dir / "hello.py").read_text() == "print('goodbye world')\n"
+
+
+@pytest.mark.asyncio
+async def test_file_patch_old_text_not_found(executor, work_dir) -> None:
+    """Fail when old_text doesn't exist in the file."""
+    target = str(work_dir / "hello.py")
+    result = await executor.execute("file_patch", {
+        "path": target,
+        "old_text": "nonexistent text",
+        "new_text": "replacement",
+    })
+    assert "not found" in result.lower() or "error" in result.lower()
+    # File should be unchanged
+    assert (work_dir / "hello.py").read_text() == "print('hello world')\n"
+
+
+@pytest.mark.asyncio
+async def test_file_patch_ambiguous(executor, work_dir) -> None:
+    """Fail when old_text matches multiple locations."""
+    target = work_dir / "dupes.py"
+    target.write_text("aaa\nbbb\naaa\n")
+    result = await executor.execute("file_patch", {
+        "path": str(target),
+        "old_text": "aaa",
+        "new_text": "ccc",
+    })
+    assert "ambiguous" in result.lower() or "multiple" in result.lower() or "unique" in result.lower()
+    # File should be unchanged
+    assert target.read_text() == "aaa\nbbb\naaa\n"
+
+
+@pytest.mark.asyncio
+async def test_file_patch_outside_workdir(executor) -> None:
+    """Reject patches outside working directory."""
+    result = await executor.execute("file_patch", {
+        "path": "/etc/passwd",
+        "old_text": "root",
+        "new_text": "evil",
+    })
+    assert "error" in result.lower() or "denied" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_file_patch_missing_file(executor) -> None:
+    """Fail gracefully on non-existent file."""
+    result = await executor.execute("file_patch", {
+        "path": "nonexistent.py",
+        "old_text": "x",
+        "new_text": "y",
+    })
+    assert "not found" in result.lower() or "error" in result.lower()
+
+
+@pytest.mark.asyncio
 async def test_unknown_tool(executor) -> None:
     result = await executor.execute("nonexistent_tool", {})
     assert "unknown" in result.lower()

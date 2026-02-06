@@ -114,6 +114,34 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "file_patch",
+            "description": (
+                "Apply a targeted search-and-replace edit to a file. "
+                "The old_text must appear exactly once in the file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path to edit.",
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact text to find (must be unique in the file).",
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Replacement text.",
+                    },
+                },
+                "required": ["path", "old_text", "new_text"],
+            },
+        },
+    },
 ]
 
 
@@ -128,6 +156,7 @@ class ToolExecutor:
         handler = {
             "file_read": self._file_read,
             "file_write": self._file_write,
+            "file_patch": self._file_patch,
             "run_shell": self._run_shell,
             "list_directory": self._list_directory,
             "grep_search": self._grep_search,
@@ -176,6 +205,29 @@ class ToolExecutor:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(args["content"])
         return f"Wrote {len(args['content'])} chars to {path}"
+
+    async def _file_patch(self, args: dict[str, Any]) -> str:
+        path = self._resolve_path(args["path"])
+        if not self._check_within_workdir(path):
+            return f"Error: patch denied — path outside working directory: {path}"
+        if not path.exists():
+            return f"Error: file not found: {path}"
+        if not path.is_file():
+            return f"Error: not a file: {path}"
+
+        old_text = args["old_text"]
+        new_text = args["new_text"]
+        content = path.read_text(errors="replace")
+        count = content.count(old_text)
+
+        if count == 0:
+            return f"Error: old_text not found in {path.name}"
+        if count > 1:
+            return f"Error: old_text is not unique in {path.name} ({count} occurrences)"
+
+        patched = content.replace(old_text, new_text, 1)
+        path.write_text(patched)
+        return f"Patched {path.name}: replaced 1 occurrence ({len(old_text)} → {len(new_text)} chars)"
 
     async def _run_shell(self, args: dict[str, Any]) -> str:
         command = args["command"]
