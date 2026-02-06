@@ -9,20 +9,29 @@ Session Modes:
                 sent every turn (up to model limits). The baseline.
 
 The runner:
-  1. Loads a task definition from YAML
-  2. Creates the appropriate driver (Gemini CLI or Claude Code)
-  3. Initializes the ContextBus + policy + scorer + watcher (for mode B)
-  4. Iterates through task turns, driving the agent and collecting metrics
-  5. Exports results to JSON for analysis
+  1. Loads a task definition from YAML via TaskLoader
+  2. Creates a temp fixture copy via FixtureManager
+  3. Creates the appropriate driver (Gemini CLI or Claude Code)
+  4. Initializes the ContextBus + policy + scorer + watcher (for mode B)
+  5. Builds turns via TurnExecutor with needle/noise injection
+  6. Iterates through task turns, driving the agent and collecting metrics
+  7. Runs Evaluator checks against the working copy
+  8. Exports results to nested output: results/{task_id}/{mode}/{driver}/
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
+import orjson
 import structlog
 
+from ctx_rm.benchmarks.evaluator import Evaluator
+from ctx_rm.benchmarks.executor import TurnContent, TurnExecutor
+from ctx_rm.benchmarks.fixtures import FixtureManager
+from ctx_rm.benchmarks.loader import TaskLoader
 from ctx_rm.core.bus import ContextBus
 from ctx_rm.core.graveyard import TieredStore
 from ctx_rm.core.policies import BudgetAwarePolicy, ClockPolicy, EvictionPolicy, LRUPolicy
@@ -56,7 +65,8 @@ class BenchmarkRunner:
         token_budget: int = 100_000,
         policy_name: str = "budget",
         output_dir: Path = Path("./results"),
-        working_dir: Path = Path("."),
+        yaml_path: Path = Path("docs/context_removal_benchmark_tasks.yaml"),
+        fixtures_root: Path = Path("benchmarks/fixtures"),
     ) -> None:
         self.driver_name = driver_name
         self.task_id = task_id
@@ -64,37 +74,95 @@ class BenchmarkRunner:
         self.token_budget = token_budget
         self.policy_name = policy_name
         self.output_dir = output_dir
-        self.working_dir = working_dir
+        self.yaml_path = yaml_path
+        self.fixtures_root = fixtures_root
 
     async def run(self) -> None:
         """Execute the benchmark."""
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        result_file = self.output_dir / f"{self.task_id}_{self.mode}_{self.driver_name}.json"
+        # Load task from YAML
+        loader = TaskLoader(self.yaml_path)
+        task = loader.get_task(self.task_id)
+
+        # Resolve and create fixture working copy
+        fixture_name = FixtureManager.resolve_fixture_name(task.repo_fixture)
+        fm = FixtureManager(self.fixtures_root)
+        working_copy = fm.create_working_copy(fixture_name)
+
+        # Create nested output directory
+        result_dir = self.output_dir / self.task_id / self.mode / self.driver_name
+        result_dir.mkdir(parents=True, exist_ok=True)
+
+        # Build turns from task definition
+        turns = TurnExecutor().build_turns(task)
+
+        # Response log path
+        log_path = result_dir / "response_log.jsonl"
 
         driver = self._create_driver()
         available = await driver.check_available()
         if not available:
             logger.error("driver_not_available", driver=self.driver_name)
+            FixtureManager.cleanup(working_copy)
             return
 
         metrics = MetricsCollector()
 
-        if self.mode == "ctx-rm":
-            await self._run_ctx_rm_mode(driver, metrics)
-        elif self.mode == "minimal":
-            await self._run_minimal_mode(driver, metrics)
-        elif self.mode == "full":
-            await self._run_full_mode(driver, metrics)
-        else:
-            logger.error("unknown_mode", mode=self.mode)
-            return
+        try:
+            if self.mode == "ctx-rm":
+                await self._run_ctx_rm_mode(driver, metrics, turns, working_copy, log_path)
+            elif self.mode == "minimal":
+                await self._run_minimal_mode(driver, metrics, turns, working_copy, log_path)
+            elif self.mode == "full":
+                await self._run_full_mode(driver, metrics, turns, working_copy, log_path)
+            else:
+                logger.error("unknown_mode", mode=self.mode)
+                return
 
-        metrics.export_json(result_file)
-        logger.info("benchmark_complete", result=str(result_file), summary=metrics.summary())
+            # Run evaluation checks
+            evaluator = Evaluator(working_copy)
+            eval_result = evaluator.evaluate_task(self.task_id, task.evaluation)
+
+            # Write metrics.json
+            metrics.export_json(result_dir / "metrics.json")
+
+            # Write evaluation.json
+            eval_data = {
+                "task_id": eval_result.task_id,
+                "all_passed": eval_result.all_passed,
+                "summary": eval_result.summary,
+                "checks": [
+                    {
+                        "check_type": cr.check_type,
+                        "target": cr.target,
+                        "passed": cr.passed,
+                        "detail": cr.detail,
+                    }
+                    for cr in eval_result.results
+                ],
+            }
+            (result_dir / "evaluation.json").write_bytes(
+                orjson.dumps(eval_data, option=orjson.OPT_INDENT_2)
+            )
+
+            logger.info(
+                "benchmark_complete",
+                result_dir=str(result_dir),
+                evaluation=eval_result.summary,
+                summary=metrics.summary(),
+            )
+        finally:
+            FixtureManager.cleanup(working_copy)
 
     # ── Mode Implementations ────────────────────────────────────────────
 
-    async def _run_ctx_rm_mode(self, driver: AgentDriver, metrics: MetricsCollector) -> None:
+    async def _run_ctx_rm_mode(
+        self,
+        driver: AgentDriver,
+        metrics: MetricsCollector,
+        turns: list[TurnContent],
+        working_copy: Path,
+        log_path: Path,
+    ) -> None:
         """Mode B: Greedy ingest + ctx-rm background removal."""
         store = TieredStore(db_path=self.output_dir / f"{self.task_id}_store.db")
         policy = self._create_policy()
@@ -112,27 +180,25 @@ class BenchmarkRunner:
         watcher_task = asyncio.create_task(watcher.run())
 
         try:
-            turns = self._load_task_turns()
-
-            for i, turn_prompt in enumerate(turns):
+            for turn in turns:
                 bus.advance_turn()
-                metrics.set_turn(i + 1)
+                metrics.set_turn(turn.turn_number)
 
                 # Ingest the turn prompt as a user segment
                 user_seg = Segment(
-                    content=turn_prompt,
+                    content=turn.prompt,
                     role=SegmentRole.USER,
-                    token_count=estimate_tokens(turn_prompt),
-                    source=f"turn:{i + 1}",
+                    token_count=estimate_tokens(turn.prompt),
+                    source=f"turn:{turn.turn_number}",
                 )
                 bus.ingest(user_seg)
 
                 # Render active context and invoke agent
                 context_text = self._render_segments(bus.active_segments)
                 response = await driver.invoke(
-                    prompt=turn_prompt,
+                    prompt=turn.prompt,
                     context=context_text,
-                    working_dir=str(self.working_dir),
+                    working_dir=str(working_copy),
                 )
 
                 # Ingest the agent's response as an assistant segment
@@ -141,7 +207,7 @@ class BenchmarkRunner:
                         content=response.text,
                         role=SegmentRole.ASSISTANT,
                         token_count=estimate_tokens(response.text),
-                        source=f"agent_response:turn:{i + 1}",
+                        source=f"agent_response:turn:{turn.turn_number}",
                     )
                     bus.ingest(assistant_seg)
 
@@ -154,9 +220,12 @@ class BenchmarkRunner:
                 })
                 metrics.take_snapshot(bus.get_stats())
 
+                # Append response log entry
+                self._append_log_entry(log_path, turn, response)
+
                 logger.info(
                     "turn_complete",
-                    turn=i + 1,
+                    turn=turn.turn_number,
                     active_tokens=bus.active_tokens,
                     response_len=len(response.text),
                 )
@@ -165,17 +234,22 @@ class BenchmarkRunner:
             await watcher_task
             store.close()
 
-    async def _run_minimal_mode(self, driver: AgentDriver, metrics: MetricsCollector) -> None:
+    async def _run_minimal_mode(
+        self,
+        driver: AgentDriver,
+        metrics: MetricsCollector,
+        turns: list[TurnContent],
+        working_copy: Path,
+        log_path: Path,
+    ) -> None:
         """Mode A: Minimal context — only current turn + system prompt."""
-        turns = self._load_task_turns()
-
-        for i, turn_prompt in enumerate(turns):
-            metrics.set_turn(i + 1)
+        for turn in turns:
+            metrics.set_turn(turn.turn_number)
 
             # No accumulated context — just the current prompt
             response = await driver.invoke(
-                prompt=turn_prompt,
-                working_dir=str(self.working_dir),
+                prompt=turn.prompt,
+                working_dir=str(working_copy),
             )
 
             metrics.record_agent_response({
@@ -186,28 +260,38 @@ class BenchmarkRunner:
                 "success": response.success,
             })
 
-            logger.info("turn_complete", turn=i + 1, mode="minimal")
+            self._append_log_entry(log_path, turn, response)
 
-    async def _run_full_mode(self, driver: AgentDriver, metrics: MetricsCollector) -> None:
+            logger.info("turn_complete", turn=turn.turn_number, mode="minimal")
+
+    async def _run_full_mode(
+        self,
+        driver: AgentDriver,
+        metrics: MetricsCollector,
+        turns: list[TurnContent],
+        working_copy: Path,
+        log_path: Path,
+    ) -> None:
         """Mode C: Full context — accumulate everything, no eviction."""
-        turns = self._load_task_turns()
         accumulated_context: list[str] = []
 
-        for i, turn_prompt in enumerate(turns):
-            metrics.set_turn(i + 1)
+        for turn in turns:
+            metrics.set_turn(turn.turn_number)
 
-            accumulated_context.append(f"[Turn {i + 1} - User]: {turn_prompt}")
+            accumulated_context.append(f"[Turn {turn.turn_number} - User]: {turn.prompt}")
 
             # Send ALL accumulated context
             context_text = "\n\n".join(accumulated_context)
             response = await driver.invoke(
-                prompt=turn_prompt,
+                prompt=turn.prompt,
                 context=context_text,
-                working_dir=str(self.working_dir),
+                working_dir=str(working_copy),
             )
 
             if response.text:
-                accumulated_context.append(f"[Turn {i + 1} - Agent]: {response.text}")
+                accumulated_context.append(
+                    f"[Turn {turn.turn_number} - Agent]: {response.text}"
+                )
 
             metrics.record_agent_response({
                 "text_length": len(response.text),
@@ -218,9 +302,11 @@ class BenchmarkRunner:
                 "accumulated_context_chars": len(context_text),
             })
 
+            self._append_log_entry(log_path, turn, response)
+
             logger.info(
                 "turn_complete",
-                turn=i + 1,
+                turn=turn.turn_number,
                 mode="full",
                 context_chars=len(context_text),
             )
@@ -245,17 +331,24 @@ class BenchmarkRunner:
         else:
             raise ValueError(f"Unknown policy: {self.policy_name}")
 
-    def _load_task_turns(self) -> list[str]:
-        """Load task turns from the benchmark YAML.
-
-        TODO: Implement full YAML task loading with needle injection.
-        For now, returns a placeholder sequence for development.
-        """
-        return [
-            f"This is turn {i + 1} of task {self.task_id}. "
-            "Please examine the codebase and work on the task."
-            for i in range(5)
-        ]
+    @staticmethod
+    def _append_log_entry(
+        log_path: Path, turn: TurnContent, response: "AgentResponse"
+    ) -> None:
+        """Append a single JSONL entry to the response log."""
+        log_entry = {
+            "turn": turn.turn_number,
+            "prompt_len": len(turn.prompt),
+            "response_text": response.text,
+            "prompt_tokens": response.prompt_tokens,
+            "completion_tokens": response.completion_tokens,
+            "tool_calls": response.tool_calls,
+            "elapsed_ms": response.elapsed_ms,
+            "success": response.success,
+            "timestamp": time.time(),
+        }
+        with log_path.open("a") as f:
+            f.write(orjson.dumps(log_entry).decode() + "\n")
 
     def _render_segments(self, segments: list[Segment]) -> str:
         """Render active segments into a context string for the agent."""
