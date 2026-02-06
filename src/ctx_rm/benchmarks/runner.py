@@ -331,6 +331,10 @@ class BenchmarkRunner:
             return GeminiCLIDriver()
         elif self.driver_name == "claude":
             return ClaudeCodeDriver()
+        elif self.driver_name == "mock":
+            from ctx_rm.drivers.mock import MockDriver
+
+            return MockDriver()
         else:
             raise ValueError(f"Unknown driver: {self.driver_name}")
 

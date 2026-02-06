@@ -45,6 +45,7 @@ console = Console()
 class Driver(StrEnum):
     gemini = "gemini"
     claude = "claude"
+    mock = "mock"
 
 
 class Mode(StrEnum):
