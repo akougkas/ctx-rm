@@ -39,7 +39,10 @@ tasks:
     evaluation:
       - check: file_contains
         target: src/auth/legacy.py
-        must_include: "if LEGACY_AUTH:"
+        must_include: "if LEGACY_AUTH:\n        token = issue_legacy_token(user)"
+      - check: file_not_contains
+        target: src/auth/legacy.py
+        must_include: "if not LEGACY_AUTH:"
       - check: file_equals
         target: config/flags.py
         must_preserve: "SAFE_MODE = True"

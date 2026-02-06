@@ -31,7 +31,7 @@ def test_get_task_cr001(loader: TaskLoader) -> None:
     task = loader.get_task("CR-001")
     assert len(task.needles) == 2
     assert len(task.context_injections) == 1
-    assert len(task.evaluation) == 2
+    assert len(task.evaluation) == 3
     assert task.min_turns == 20
 
 
@@ -41,10 +41,11 @@ def test_get_task_not_found(loader: TaskLoader) -> None:
 
 
 def test_eval_check_discrimination(loader: TaskLoader) -> None:
-    # CR-001: file_contains + file_equals
+    # CR-001: file_contains + file_not_contains + file_equals
     cr001 = loader.get_task("CR-001")
     assert isinstance(cr001.evaluation[0], FileContainsCheck)
-    assert isinstance(cr001.evaluation[1], FileEqualsCheck)
+    assert isinstance(cr001.evaluation[1], FileNotContainsCheck)
+    assert isinstance(cr001.evaluation[2], FileEqualsCheck)
 
     # CR-002: file_contains_in_order
     cr002 = loader.get_task("CR-002")

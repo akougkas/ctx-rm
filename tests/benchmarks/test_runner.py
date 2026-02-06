@@ -210,6 +210,7 @@ def test_ctx_rm_mode_produces_evaluation_checks(tmp_path: Path) -> None:
 
     CR-001 evaluation checks:
     - file_contains on src/auth/legacy.py for "if LEGACY_AUTH:" -> FAILS (fixture has bug)
+    - file_not_contains on src/auth/legacy.py for "if not LEGACY_AUTH:" -> FAILS (fixture has bug)
     - file_equals on config/flags.py for "SAFE_MODE = True" -> PASSES (fixture preserves it)
     """
     runner = BenchmarkRunner(
@@ -226,8 +227,8 @@ def test_ctx_rm_mode_produces_evaluation_checks(tmp_path: Path) -> None:
     eval_data = orjson.loads((result_dir / "evaluation.json").read_bytes())
     checks = eval_data["checks"]
 
-    # Must have exactly 2 checks for CR-001
-    assert len(checks) == 2
+    # Must have exactly 3 checks for CR-001
+    assert len(checks) == 3
 
     # Each check has the required schema
     for check in checks:
@@ -242,11 +243,14 @@ def test_ctx_rm_mode_produces_evaluation_checks(tmp_path: Path) -> None:
     assert len(flags_check) == 1
     assert flags_check[0]["passed"] is True
 
-    # file_contains check on src/auth/legacy.py for "if LEGACY_AUTH:" passes
-    # because "if not LEGACY_AUTH:" contains the substring "if LEGACY_AUTH:"
-    auth_check = [c for c in checks if c["target"] == "src/auth/legacy.py"]
-    assert len(auth_check) == 1
-    assert auth_check[0]["passed"] is True
+    # Auth checks should both fail (fixture has bug, mock driver doesn't fix it)
+    auth_contains = [c for c in checks if c["check_type"] == "file_contains" and c["target"] == "src/auth/legacy.py"]
+    assert len(auth_contains) == 1
+    assert auth_contains[0]["passed"] is False
+
+    auth_not_contains = [c for c in checks if c["check_type"] == "file_not_contains" and c["target"] == "src/auth/legacy.py"]
+    assert len(auth_not_contains) == 1
+    assert auth_not_contains[0]["passed"] is False
 
 
 # ── run_index and policy path tests ────────────────────────────────────────
