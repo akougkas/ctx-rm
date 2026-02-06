@@ -32,12 +32,21 @@ from ctx_rm.benchmarks.evaluator import Evaluator
 from ctx_rm.benchmarks.executor import TurnContent, TurnExecutor
 from ctx_rm.benchmarks.fixtures import FixtureManager
 from ctx_rm.benchmarks.loader import TaskLoader
+from ctx_rm.config import CtxRmConfig
 from ctx_rm.core.bus import ContextBus
+from ctx_rm.core.embedding import HashingEmbeddingProvider
 from ctx_rm.core.graveyard import TieredStore
-from ctx_rm.core.policies import ARCPolicy, BudgetAwarePolicy, ClockPolicy, EvictionPolicy, InnoDBPolicy, LRUPolicy
-from ctx_rm.core.scorer import HeuristicScorer
+from ctx_rm.core.policies import (
+    ARCPolicy,
+    BudgetAwarePolicy,
+    ClockPolicy,
+    EvictionPolicy,
+    InnoDBPolicy,
+    LRUPolicy,
+)
+from ctx_rm.core.scorer import HeuristicScorer, Scorer
 from ctx_rm.core.segment import Segment, SegmentRole
-from ctx_rm.drivers.base import AgentDriver
+from ctx_rm.drivers.base import AgentDriver, AgentResponse
 from ctx_rm.drivers.claude import ClaudeCodeDriver
 from ctx_rm.drivers.gemini import GeminiCLIDriver
 from ctx_rm.telemetry.metrics import MetricsCollector
@@ -164,9 +173,13 @@ class BenchmarkRunner:
         log_path: Path,
     ) -> None:
         """Mode B: Greedy ingest + ctx-rm background removal."""
-        store = TieredStore(db_path=self.output_dir / f"{self.task_id}_store.db")
+        embedding_provider = HashingEmbeddingProvider()
+        store = TieredStore(
+            db_path=self.output_dir / f"{self.task_id}_store.db",
+            embedding_provider=embedding_provider,
+        )
         policy = self._create_policy()
-        scorer = HeuristicScorer()
+        scorer = self._create_scorer()
 
         bus = ContextBus(
             token_budget=self.token_budget,
@@ -335,9 +348,22 @@ class BenchmarkRunner:
         else:
             raise ValueError(f"Unknown policy: {self.policy_name}")
 
+    def _create_scorer(self) -> Scorer:
+        config = CtxRmConfig()
+        if config.scorer == "ollama":
+            from ctx_rm.integrations.ollama_scorer import OllamaScorer
+
+            return OllamaScorer(
+                host=config.ollama_host,
+                model=config.ollama_model,
+                max_concurrent=config.ollama_max_concurrent,
+                task_goal=self.task_id,
+            )
+        return HeuristicScorer()
+
     @staticmethod
     def _append_log_entry(
-        log_path: Path, turn: TurnContent, response: "AgentResponse"
+        log_path: Path, turn: TurnContent, response: AgentResponse
     ) -> None:
         """Append a single JSONL entry to the response log."""
         log_entry = {

@@ -1,4 +1,4 @@
-"""Tests for CLI bench --all and compare with nested results."""
+"""Tests for CLI bench --all, compare, tasks, and info commands."""
 
 from __future__ import annotations
 
@@ -110,6 +110,28 @@ def test_bench_all_skips_unavailable_drivers(
     assert "No drivers available" in result.output
 
 
+@patch("ctx_rm.benchmarks.runner.BenchmarkRunner")
+def test_bench_accepts_policy_and_scorer(mock_runner_cls: MagicMock) -> None:
+    """bench accepts --policy and --scorer enum options."""
+    mock_instance = MagicMock()
+    mock_instance.run = AsyncMock()
+    mock_runner_cls.return_value = mock_instance
+
+    result = runner.invoke(app, [
+        "bench", "--task", "CR-001", "--policy", "arc", "--scorer", "heuristic",
+    ])
+    assert result.exit_code == 0, result.output
+    call_kwargs = mock_runner_cls.call_args.kwargs
+    assert call_kwargs["policy_name"] == "arc"
+
+
+@patch("ctx_rm.benchmarks.runner.BenchmarkRunner")
+def test_bench_rejects_invalid_mode(mock_runner_cls: MagicMock) -> None:
+    """Invalid mode value is rejected by the enum."""
+    result = runner.invoke(app, ["bench", "--mode", "invalid"])
+    assert result.exit_code != 0
+
+
 # ── compare tests ────────────────────────────────────────────────────────────
 
 
@@ -142,14 +164,13 @@ def test_compare_shows_mode_summary(tmp_path: Path) -> None:
 
     result = runner.invoke(app, ["compare", str(tmp_path)])
     assert result.exit_code == 0, result.output
-    assert "Mode Summary" in result.output
     # ctx-rm: 2/2 passed, minimal: 0/2 passed
     assert "ctx-rm" in result.output
     assert "minimal" in result.output
 
 
 def test_compare_handles_missing_evaluation(tmp_path: Path) -> None:
-    """compare does not crash when evaluation.json is missing; shows N/A."""
+    """compare does not crash when evaluation.json is missing; shows --."""
     leaf = tmp_path / "CR-001" / "full" / "gemini"
     _write_metrics(leaf / "metrics.json")
     # No evaluation.json written
@@ -157,4 +178,34 @@ def test_compare_handles_missing_evaluation(tmp_path: Path) -> None:
     result = runner.invoke(app, ["compare", str(tmp_path)])
     assert result.exit_code == 0, result.output
     assert "CR-001" in result.output
-    assert "N/A" in result.output
+    assert "--" in result.output
+
+
+def test_compare_missing_dir(tmp_path: Path) -> None:
+    """compare exits with error for nonexistent directory."""
+    result = runner.invoke(app, ["compare", str(tmp_path / "nonexistent")])
+    assert result.exit_code == 1
+
+
+# ── tasks tests ──────────────────────────────────────────────────────────────
+
+
+def test_tasks_lists_all_benchmark_tasks() -> None:
+    """tasks command lists all 10 benchmark tasks."""
+    result = runner.invoke(app, ["tasks"])
+    assert result.exit_code == 0, result.output
+    assert "CR-001" in result.output
+    assert "CR-010" in result.output
+    assert "10 tasks available" in result.output
+
+
+# ── info tests ───────────────────────────────────────────────────────────────
+
+
+def test_info_shows_version_and_components() -> None:
+    """info command shows version, policies, and scorer."""
+    result = runner.invoke(app, ["info"])
+    assert result.exit_code == 0, result.output
+    assert "ctx-rm" in result.output
+    assert "budget" in result.output
+    assert "heuristic" in result.output

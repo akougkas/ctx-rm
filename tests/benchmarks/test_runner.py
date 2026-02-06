@@ -131,3 +131,21 @@ def test_response_log_entries_have_all_fields(tmp_path: Path) -> None:
     for line in log_path.read_text().strip().splitlines():
         entry = orjson.loads(line)
         assert expected_keys.issubset(entry.keys()), f"Missing keys: {expected_keys - entry.keys()}"
+
+
+def test_create_scorer_defaults_to_heuristic(tmp_path: Path) -> None:
+    """Default config.scorer='heuristic' means _create_scorer returns HeuristicScorer."""
+    runner, _ = _make_runner(tmp_path, mode="ctx-rm")
+    from ctx_rm.core.scorer import HeuristicScorer
+
+    scorer = runner._create_scorer()
+    assert isinstance(scorer, HeuristicScorer)
+
+
+def test_runner_imports_embedding_provider() -> None:
+    """BenchmarkRunner imports HashingEmbeddingProvider for ctx-rm mode."""
+    from ctx_rm.benchmarks.runner import HashingEmbeddingProvider
+    from ctx_rm.core.embedding import EmbeddingProvider
+
+    provider = HashingEmbeddingProvider()
+    assert isinstance(provider, EmbeddingProvider)
