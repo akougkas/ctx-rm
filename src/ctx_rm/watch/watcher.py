@@ -62,20 +62,19 @@ class Watcher:
     def __init__(self, bus: ContextBus, config: WatcherConfig | None = None) -> None:
         self.bus = bus
         self.config = config or WatcherConfig()
-        self._running = False
+        self._stop_event = asyncio.Event()
         self._last_turn: int = 0
         self._cycles_run: int = 0
 
     async def run(self) -> None:
         """Main watcher loop — runs until stop() is called."""
-        self._running = True
         logger.info(
             "watcher_started",
             mode=self.config.mode.value,
             interval=self.config.interval_seconds,
         )
 
-        while self._running:
+        while not self._stop_event.is_set():
             try:
                 if self._should_trigger():
                     evicted = self.bus.run_eviction_cycle()
@@ -89,18 +88,30 @@ class Watcher:
                         )
                     self._last_turn = self.bus.turn_number
 
-                await asyncio.sleep(self.config.interval_seconds)
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(),
+                        timeout=self.config.interval_seconds,
+                    )
+                except TimeoutError:
+                    pass  # Normal: timeout = interval elapsed, loop continues
             except asyncio.CancelledError:
                 break
             except Exception:
                 logger.exception("watcher_error")
-                await asyncio.sleep(self.config.interval_seconds)
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(),
+                        timeout=self.config.interval_seconds,
+                    )
+                except TimeoutError:
+                    pass
 
         logger.info("watcher_stopped", total_cycles=self._cycles_run)
 
     def stop(self) -> None:
         """Signal the watcher to stop."""
-        self._running = False
+        self._stop_event.set()
 
     def _should_trigger(self) -> bool:
         """Evaluate trigger conditions based on configured mode."""
@@ -130,7 +141,7 @@ class Watcher:
 
     def get_stats(self) -> dict[str, Any]:
         return {
-            "running": self._running,
+            "running": not self._stop_event.is_set(),
             "cycles_run": self._cycles_run,
             "mode": self.config.mode.value,
             "last_turn_checked": self._last_turn,
