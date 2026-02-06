@@ -41,6 +41,15 @@ class CtxRmConfig(BaseSettings):
     gemini_model: str = Field(default="gemini-2.5-pro", description="Gemini model to use")
     claude_model: str = Field(default="sonnet", description="Claude model to use")
 
+    # LlamaCpp driver settings
+    llama_base_url: str = Field(
+        default="http://192.168.86.141:8080",
+        description="llama-server base URL",
+    )
+    llama_temperature: float = Field(default=0.3, description="LlamaCpp temperature")
+    llama_max_tokens: int = Field(default=4096, description="LlamaCpp max completion tokens")
+    llama_timeout: float = Field(default=120.0, description="LlamaCpp request timeout in seconds")
+
     # LLM Scoring (opt-in)
     scorer: str = Field(default="heuristic", description="Scorer: heuristic or ollama")
     ollama_host: str = Field(

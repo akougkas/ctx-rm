@@ -23,6 +23,7 @@ class SegmentRole(StrEnum):
     USER = "user"
     ASSISTANT = "assistant"
     TOOL = "tool"
+    CONTEXT = "context"
 
 
 class Tier(StrEnum):

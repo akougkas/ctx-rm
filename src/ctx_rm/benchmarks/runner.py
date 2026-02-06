@@ -1,22 +1,13 @@
 """BenchmarkRunner: orchestrates experiments across three session modes.
 
 Session Modes:
-  A. MINIMAL  — Conservative context. Only the current turn's prompt and
-                system instructions. Previous turns are discarded.
-  B. CTX_RM   — Greedy ingest + background removal. The agent ingests
-                everything, ctx-rm's ContextBus manages what stays active.
-  C. FULL     — Greedy ingest, no management. All accumulated context is
-                sent every turn (up to model limits). The baseline.
+  A. MINIMAL  — System prompt only. No accumulated context or noise.
+  B. CTX_RM   — Full context (needles + noise) with eviction active.
+  C. FULL     — Full context (needles + noise) with huge budget, no eviction.
 
-The runner:
-  1. Loads a task definition from YAML via TaskLoader
-  2. Creates a temp fixture copy via FixtureManager
-  3. Creates the appropriate driver (Gemini CLI or Claude Code)
-  4. Initializes the ContextBus + policy + scorer + watcher (for mode B)
-  5. Builds turns via TurnExecutor with needle/noise injection
-  6. Iterates through task turns, driving the agent and collecting metrics
-  7. Runs Evaluator checks against the working copy
-  8. Exports results to nested output: results/{task_id}/{mode}/{driver}/
+Two runner implementations:
+  - BenchmarkRunner (legacy): uses old AgentDriver (Gemini CLI, Claude Code)
+  - AgentLoopRunner: uses new AgentLoop + ChatDriver (LlamaCpp, mock)
 """
 
 from __future__ import annotations
@@ -29,7 +20,7 @@ import orjson
 import structlog
 
 from ctx_rm.benchmarks.evaluator import Evaluator
-from ctx_rm.benchmarks.executor import TurnContent, TurnExecutor
+from ctx_rm.benchmarks.executor import TurnContent, TurnExecutor, generate_noise
 from ctx_rm.core.tokenizer import estimate_tokens
 from ctx_rm.benchmarks.fixtures import FixtureManager
 from ctx_rm.benchmarks.loader import TaskLoader
@@ -398,3 +389,297 @@ class BenchmarkRunner:
                 prefix += f" ({seg.source})"
             parts.append(f"{prefix}: {seg.content}")
         return "\n\n".join(parts)
+
+
+# ── AgentLoopRunner ─────────────────────────────────────────────────────────
+
+
+class AgentLoopRunner:
+    """Benchmark runner using AgentLoop + ChatDriver (LlamaCpp or mock).
+
+    Unlike BenchmarkRunner (which drives CLI agents per-turn), this runner
+    delegates to AgentLoop which runs autonomously — the agent decides its
+    own tool calls and turn count.
+
+    Modes:
+      MINIMAL: system prompt only, no noise, small budget
+      FULL:    system prompt + needles + noise, huge budget (no eviction)
+      CTX-RM:  system prompt + needles + noise, calibrated budget + eviction
+    """
+
+    # Budget for FULL mode — large enough that eviction never triggers
+    FULL_BUDGET = 1_000_000
+
+    def __init__(
+        self,
+        driver_name: str = "llamacpp",
+        task_id: str = "CR-001",
+        mode: str = "ctx-rm",
+        token_budget: int = 100_000,
+        policy_name: str = "budget",
+        output_dir: Path = Path("./results"),
+        yaml_path: Path = Path("docs/context_removal_benchmark_tasks.yaml"),
+        fixtures_root: Path = Path("benchmarks/fixtures"),
+        run_index: int = 1,
+        max_turns: int = 30,
+    ) -> None:
+        self.driver_name = driver_name
+        self.task_id = task_id
+        self.mode = mode
+        self.token_budget = token_budget
+        self.policy_name = policy_name
+        self.output_dir = output_dir
+        self.yaml_path = yaml_path
+        self.fixtures_root = fixtures_root
+        self.run_index = run_index
+        self.max_turns = max_turns
+
+    async def run(self) -> None:
+        """Load task, create fixture, run agent, evaluate."""
+        from ctx_rm.agents.loop import AgentLoop, ChatDriver
+
+        loader = TaskLoader(self.yaml_path)
+        task = loader.get_task(self.task_id)
+
+        fixture_name = FixtureManager.resolve_fixture_name(task.repo_fixture)
+        fm = FixtureManager(self.fixtures_root)
+        working_copy = fm.create_working_copy(fixture_name)
+
+        try:
+            result = await self.run_with_task(
+                task=task,
+                working_copy=working_copy,
+            )
+        finally:
+            FixtureManager.cleanup(working_copy)
+
+    async def run_with_task(
+        self,
+        task: "Task",
+        working_copy: Path,
+        driver_factory: Any = None,
+    ) -> "AgentResult":
+        """Run a benchmark against a pre-prepared task and working copy.
+
+        Args:
+            task: The loaded Task object.
+            working_copy: Path to the fixture working directory.
+            driver_factory: Optional callable returning a ChatDriver (for testing).
+        """
+        from ctx_rm.agents.loop import AgentLoop, AgentResult
+
+        result_dir = self._result_dir()
+        result_dir.mkdir(parents=True, exist_ok=True)
+
+        metrics = MetricsCollector()
+
+        # Create driver
+        if driver_factory is not None:
+            driver = driver_factory()
+        else:
+            driver = self._create_driver()
+
+        # Create bus with mode-appropriate budget
+        bus = self._create_bus()
+
+        # Inject context (needles + noise) based on mode
+        self._inject_context(bus, task)
+
+        # Build system prompt and task instruction
+        system_prompt = self._build_system_prompt(task)
+        task_instruction = self._build_task_instruction(task, working_copy)
+
+        # Create and run agent loop
+        loop = AgentLoop(
+            driver=driver,
+            bus=bus,
+            working_dir=str(working_copy),
+            max_turns=self.max_turns,
+        )
+
+        result = await loop.run(system_prompt, task_instruction)
+
+        # Run evaluation
+        evaluator = Evaluator(working_copy)
+        eval_result = evaluator.evaluate_task(self.task_id, task.evaluation)
+
+        # Export metrics
+        metrics.take_snapshot(bus.get_stats())
+        metrics.export_json(result_dir / "metrics.json")
+
+        # Export evaluation
+        eval_data = {
+            "task_id": eval_result.task_id,
+            "all_passed": eval_result.all_passed,
+            "summary": eval_result.summary,
+            "checks": [
+                {
+                    "check_type": cr.check_type,
+                    "target": cr.target,
+                    "passed": cr.passed,
+                    "detail": cr.detail,
+                }
+                for cr in eval_result.results
+            ],
+            "agent_result": {
+                "turns": result.turns,
+                "tool_calls": result.tool_calls_made,
+                "prompt_tokens": result.total_prompt_tokens,
+                "completion_tokens": result.total_completion_tokens,
+                "segments_evicted": result.segments_evicted,
+            },
+        }
+        (result_dir / "evaluation.json").write_bytes(
+            orjson.dumps(eval_data, option=orjson.OPT_INDENT_2)
+        )
+
+        logger.info(
+            "agent_benchmark_complete",
+            task=self.task_id,
+            mode=self.mode,
+            turns=result.turns,
+            eval=eval_result.summary,
+        )
+
+        return result
+
+    # ── System prompt ───────────────────────────────────────────────────
+
+    def _build_system_prompt(self, task: "Task") -> str:
+        """Build system prompt from task scenario + needle content."""
+        parts = [
+            "You are a coding agent. Complete the task using the available tools.",
+            "",
+            "## Task Scenario",
+            task.scenario.strip(),
+        ]
+
+        if task.needles:
+            parts.append("")
+            parts.append("## Critical Context")
+            for needle in task.needles:
+                parts.append(f"- [{needle.injection_method}] {needle.content}")
+
+        return "\n".join(parts)
+
+    def _build_task_instruction(self, task: "Task", working_copy: Path) -> str:
+        """Build the user message that starts the agent."""
+        return (
+            f"Working directory: {working_copy}\n\n"
+            f"{task.scenario.strip()}\n\n"
+            "Use the available tools to complete this task. "
+            "Read files to understand the codebase, then make the necessary changes."
+        )
+
+    # ── Context injection ──────────────────────────────────────────────
+
+    def _inject_context(self, bus: ContextBus, task: "Task") -> None:
+        """Inject noise segments into the bus based on mode.
+
+        MINIMAL: no noise, no extra needles
+        FULL and CTX-RM: inject noise as context segments
+        """
+        if self.mode == "minimal":
+            return
+
+        for injection in task.context_injections:
+            noise = generate_noise(injection.size_tokens, injection.description)
+            seg = Segment(
+                content=noise,
+                role=SegmentRole.CONTEXT,
+                token_count=estimate_tokens(noise),
+                source=f"noise:{injection.description}",
+                metadata={
+                    "openai_message": {
+                        "role": "user",
+                        "content": f"[context] {noise}",
+                    },
+                },
+            )
+            bus.ingest(seg)
+
+    # ── Bus creation ───────────────────────────────────────────────────
+
+    def _create_bus(self) -> ContextBus:
+        """Create a ContextBus configured for the current mode."""
+        from ctx_rm.core.embedding import HashingEmbeddingProvider
+
+        if self.mode == "full":
+            budget = self.FULL_BUDGET
+        else:
+            budget = self.token_budget
+
+        store = TieredStore(
+            embedding_provider=HashingEmbeddingProvider(),
+        )
+        policy = self._create_policy()
+        scorer = self._create_scorer()
+
+        return ContextBus(
+            token_budget=budget,
+            store=store,
+            policy=policy,
+            scorer=scorer,
+        )
+
+    # ── Driver creation ────────────────────────────────────────────────
+
+    def _create_driver(self) -> Any:
+        """Create the appropriate ChatDriver based on driver_name."""
+        if self.driver_name == "llamacpp":
+            from ctx_rm.drivers.llamacpp import LlamaCppDriver
+
+            config = CtxRmConfig()
+            return LlamaCppDriver(
+                base_url=config.llama_base_url,
+                temperature=config.llama_temperature,
+                max_tokens=config.llama_max_tokens,
+                timeout=config.llama_timeout,
+            )
+        else:
+            raise ValueError(
+                f"AgentLoopRunner only supports ChatDriver-compatible drivers, "
+                f"got: {self.driver_name}"
+            )
+
+    # ── Result directory ───────────────────────────────────────────────
+
+    def _result_dir(self) -> Path:
+        if self.mode == "ctx-rm":
+            return (
+                self.output_dir / self.task_id / "ctx-rm" / self.driver_name
+                / self.policy_name / f"run-{self.run_index}"
+            )
+        return (
+            self.output_dir / self.task_id / self.mode / self.driver_name
+            / f"run-{self.run_index}"
+        )
+
+    # ── Reuse helpers from BenchmarkRunner ─────────────────────────────
+
+    def _create_policy(self) -> EvictionPolicy:
+        if self.policy_name == "lru":
+            return LRUPolicy()
+        elif self.policy_name == "clock":
+            return ClockPolicy()
+        elif self.policy_name == "budget":
+            return BudgetAwarePolicy()
+        elif self.policy_name == "arc":
+            return ARCPolicy(capacity_tokens=self.token_budget)
+        elif self.policy_name == "innodb":
+            return InnoDBPolicy(capacity_tokens=self.token_budget)
+        else:
+            raise ValueError(f"Unknown policy: {self.policy_name}")
+
+    def _create_scorer(self) -> Scorer:
+        config = CtxRmConfig()
+        if config.scorer == "ollama":
+            from ctx_rm.integrations.ollama_scorer import OllamaScorer
+
+            return OllamaScorer(
+                host=config.ollama_host,
+                model=config.ollama_model,
+                max_concurrent=config.ollama_max_concurrent,
+                task_goal=self.task_id,
+            )
+        return HeuristicScorer()
