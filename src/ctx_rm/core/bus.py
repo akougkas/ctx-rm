@@ -214,8 +214,12 @@ class ContextBus:
         return True
 
     def search_graveyard(self, query: str, top_k: int = 5) -> list[Segment]:
-        """Search evicted segments by content similarity."""
+        """Search evicted segments in cold storage by content similarity."""
         return self.store.search(query, top_k=top_k)
+
+    def search_evicted(self, query: str, top_k: int = 5) -> list[Segment]:
+        """Search all evicted segments (warm + cold) by content match."""
+        return self.store.search_all(query, top_k=top_k)
 
     def render_context(self) -> list[dict[str, str]]:
         """Render active context as a list of role/content pairs.

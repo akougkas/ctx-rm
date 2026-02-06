@@ -436,6 +436,31 @@ class TieredStore:
         """Search across cold storage for matching segments."""
         return self.cold.search(query, top_k=top_k, threshold=threshold)
 
+    def search_all(self, query: str, top_k: int = 5) -> list[Segment]:
+        """Search all non-active tiers (warm + cold) for matching segments.
+
+        Warm is searched by keyword substring match.
+        Cold is searched by embedding similarity (or keyword fallback).
+        Results are merged and deduplicated, warm matches first.
+        """
+        query_lower = query.lower()
+        results: list[Segment] = []
+        seen: set[str] = set()
+
+        # Search warm (keyword match on content)
+        for seg in self.warm._store.values():
+            if query_lower in seg.content.lower():
+                results.append(seg)
+                seen.add(seg.seg_id)
+
+        # Search cold (embedding or keyword)
+        cold_results = self.cold.search(query, top_k=top_k)
+        for seg in cold_results:
+            if seg.seg_id not in seen:
+                results.append(seg)
+
+        return results[:top_k]
+
     def get_stats(self) -> dict:
         return {
             "warm_count": self.warm.count,
