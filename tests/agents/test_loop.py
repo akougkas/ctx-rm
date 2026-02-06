@@ -301,3 +301,46 @@ async def test_no_watcher_by_default(tmp_path) -> None:
 
     result = await loop.run("sys", "task")
     assert result.watcher_stats is None
+
+
+# ── Message ordering ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_message_ordering_system_first(tmp_path) -> None:
+    """System message must come first even when context pre-injected into bus.
+
+    Reproduces the runner pattern: _inject_context() ingests segments
+    before loop.run() ingests system+user. Without the ordering fix,
+    the LLM sees [context, system, user] instead of [system, context, user].
+    """
+    from ctx_rm.core.segment import Segment
+    from ctx_rm.core.tokenizer import estimate_tokens
+
+    bus = _bus()
+
+    # Simulate runner._inject_context() — inject before loop.run()
+    needle = Segment(
+        content="CRITICAL: port must be 9876",
+        role=SegmentRole.CONTEXT,
+        token_count=estimate_tokens("CRITICAL: port must be 9876"),
+        source="needle:N1",
+        metadata={
+            "openai_message": {
+                "role": "user",
+                "content": "[context] CRITICAL: port must be 9876",
+            },
+        },
+    )
+    bus.ingest(needle)
+
+    driver = MockDriver([_text("ok")])
+    loop = AgentLoop(driver=driver, bus=bus, working_dir=str(tmp_path))
+
+    await loop.run("You are a coding agent.", "Create config.json")
+
+    # Check the messages actually sent to the driver
+    sent = driver.call_log[0]["messages"]
+    assert sent[0]["role"] == "system", (
+        f"First message must be system, got: {sent[0]['role']}"
+    )

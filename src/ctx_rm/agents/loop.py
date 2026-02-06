@@ -131,8 +131,20 @@ class AgentLoop:
     # ── Rendering ────────────────────────────────────────────────────────
 
     def _render_messages(self) -> list[dict[str, Any]]:
-        """Convert active segments to OpenAI-format messages."""
-        return [seg.metadata["openai_message"] for seg in self.bus.active_segments]
+        """Convert active segments to OpenAI-format messages.
+
+        System messages are always placed first (OpenAI format requirement).
+        All other messages preserve insertion order.
+        """
+        system = []
+        rest = []
+        for seg in self.bus.active_segments:
+            msg = seg.metadata["openai_message"]
+            if msg["role"] == "system":
+                system.append(msg)
+            else:
+                rest.append(msg)
+        return system + rest
 
     # ── Ingestion helpers ────────────────────────────────────────────────
 
