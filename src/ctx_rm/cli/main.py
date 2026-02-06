@@ -46,6 +46,7 @@ class Driver(StrEnum):
     gemini = "gemini"
     claude = "claude"
     mock = "mock"
+    llamacpp = "llamacpp"
 
 
 class Mode(StrEnum):
@@ -83,10 +84,15 @@ def info() -> None:
     async def _check() -> dict[str, bool]:
         from ctx_rm.drivers.claude import ClaudeCodeDriver
         from ctx_rm.drivers.gemini import GeminiCLIDriver
+        from ctx_rm.drivers.llamacpp import LlamaCppDriver
 
         gemini = await GeminiCLIDriver().check_available()
         claude = await ClaudeCodeDriver().check_available()
-        return {"gemini": gemini, "claude": claude}
+        try:
+            llamacpp = await LlamaCppDriver(base_url=config.llama_base_url).check_available()
+        except Exception:
+            llamacpp = False
+        return {"gemini": gemini, "claude": claude, "llamacpp": llamacpp}
 
     drivers = asyncio.run(_check())
 
@@ -223,8 +229,6 @@ def bench(
     Single run:  ctx-rm bench --task CR-003 --mode ctx-rm --policy arc
     Batch run:   ctx-rm bench --all --policy budget
     """
-    from ctx_rm.benchmarks.runner import BenchmarkRunner
-
     # Apply scorer override to config env before runner reads it
     os.environ["CTX_RM_SCORER"] = scorer.value
 
@@ -251,15 +255,30 @@ def bench(
     console.print(header)
     console.print()
 
-    runner = BenchmarkRunner(
-        driver_name=driver.value,
-        task_id=task,
-        mode=mode.value,
-        token_budget=budget,
-        policy_name=policy.value,
-        output_dir=output,
-        run_index=run_index,
-    )
+    if driver == Driver.llamacpp:
+        from ctx_rm.benchmarks.runner import AgentLoopRunner
+
+        runner = AgentLoopRunner(
+            driver_name=driver.value,
+            task_id=task,
+            mode=mode.value,
+            token_budget=budget,
+            policy_name=policy.value,
+            output_dir=output,
+            run_index=run_index,
+        )
+    else:
+        from ctx_rm.benchmarks.runner import BenchmarkRunner
+
+        runner = BenchmarkRunner(
+            driver_name=driver.value,
+            task_id=task,
+            mode=mode.value,
+            token_budget=budget,
+            policy_name=policy.value,
+            output_dir=output,
+            run_index=run_index,
+        )
     asyncio.run(runner.run())
 
     # Compute result_dir matching runner's path construction

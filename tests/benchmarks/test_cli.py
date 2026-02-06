@@ -305,3 +305,26 @@ def test_info_shows_version_and_components() -> None:
     assert "ctx-rm" in result.output
     assert "budget" in result.output
     assert "heuristic" in result.output
+
+
+# ── llamacpp driver routing ─────────────────────────────────────────────────
+
+
+@patch("ctx_rm.benchmarks.runner.AgentLoopRunner")
+def test_bench_llamacpp_routes_to_agent_loop_runner(mock_runner_cls: MagicMock) -> None:
+    """--driver llamacpp uses AgentLoopRunner instead of BenchmarkRunner."""
+    mock_instance = MagicMock()
+    mock_instance.run = AsyncMock()
+    mock_runner_cls.return_value = mock_instance
+
+    result = runner.invoke(app, ["bench", "--driver", "llamacpp", "--task", "CR-001"])
+    assert result.exit_code == 0, result.output
+    mock_runner_cls.assert_called_once()
+    call_kwargs = mock_runner_cls.call_args.kwargs
+    assert call_kwargs["driver_name"] == "llamacpp"
+
+
+def test_bench_rejects_invalid_driver() -> None:
+    """Invalid driver value is rejected by the enum."""
+    result = runner.invoke(app, ["bench", "--driver", "invalid"])
+    assert result.exit_code != 0
