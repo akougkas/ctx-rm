@@ -112,7 +112,8 @@ def _make_task(fixture_path: Path) -> Task:
 class TestAgentLoopRunner:
     """Test the AgentLoopRunner orchestration."""
 
-    def test_build_system_prompt_includes_scenario_and_needles(self, tmp_path: Path) -> None:
+    def test_system_prompt_contains_scenario_only(self, tmp_path: Path) -> None:
+        """System prompt must NOT contain needle content — needles are evictable."""
         from ctx_rm.benchmarks.runner import AgentLoopRunner
 
         task = _make_task(tmp_path)
@@ -122,17 +123,96 @@ class TestAgentLoopRunner:
             mode="ctx-rm",
         )
         prompt = runner._build_system_prompt(task)
-        assert "Fix the bug" in prompt
-        assert "test output content" in prompt  # needle content
+        assert "Fix the bug" in prompt  # scenario present
+        assert "Critical Context" not in prompt  # no needle section
+        assert "doc_read" not in prompt  # no injection_method
+        for needle in task.needles:
+            assert needle.content not in prompt  # no needle content
 
-    def test_build_system_prompt_without_needles(self, tmp_path: Path) -> None:
+    def test_system_prompt_same_regardless_of_needles(self, tmp_path: Path) -> None:
         from ctx_rm.benchmarks.runner import AgentLoopRunner
 
         task = _make_task(tmp_path)
+        runner = AgentLoopRunner(driver_name="llamacpp", task_id="TEST-001", mode="ctx-rm")
+        prompt_with = runner._build_system_prompt(task)
+
         task.needles = []
-        runner = AgentLoopRunner(driver_name="llamacpp", task_id="TEST-001", mode="minimal")
-        prompt = runner._build_system_prompt(task)
-        assert "Fix the bug" in prompt
+        prompt_without = runner._build_system_prompt(task)
+        assert prompt_with == prompt_without
+
+    def test_needles_injected_as_separate_bus_segments(self, tmp_path: Path) -> None:
+        """Needles must appear as individual evictable segments on the bus."""
+        from ctx_rm.benchmarks.runner import AgentLoopRunner
+
+        task = _make_task(tmp_path)
+        runner = AgentLoopRunner(
+            driver_name="llamacpp",
+            task_id="TEST-001",
+            mode="ctx-rm",
+            token_budget=100_000,
+        )
+        bus = runner._create_bus()
+        runner._inject_context(bus, task)
+
+        needle_segs = [s for s in bus.active_segments if "needle" in s.source]
+        assert len(needle_segs) == len(task.needles)
+        # Each needle segment carries the needle content
+        assert task.needles[0].content in needle_segs[0].content
+
+    def test_needle_segments_are_not_pinned(self, tmp_path: Path) -> None:
+        """Needle segments must be evictable (pinned=False)."""
+        from ctx_rm.benchmarks.runner import AgentLoopRunner
+
+        task = _make_task(tmp_path)
+        runner = AgentLoopRunner(
+            driver_name="llamacpp",
+            task_id="TEST-001",
+            mode="ctx-rm",
+            token_budget=100_000,
+        )
+        bus = runner._create_bus()
+        runner._inject_context(bus, task)
+
+        needle_segs = [s for s in bus.active_segments if "needle" in s.source]
+        for seg in needle_segs:
+            assert seg.pinned is False, f"Needle segment {seg.source} must not be pinned"
+
+    def test_needle_segments_have_openai_message(self, tmp_path: Path) -> None:
+        """Needle segments must have openai_message metadata for rendering."""
+        from ctx_rm.benchmarks.runner import AgentLoopRunner
+
+        task = _make_task(tmp_path)
+        runner = AgentLoopRunner(
+            driver_name="llamacpp",
+            task_id="TEST-001",
+            mode="ctx-rm",
+            token_budget=100_000,
+        )
+        bus = runner._create_bus()
+        runner._inject_context(bus, task)
+
+        needle_segs = [s for s in bus.active_segments if "needle" in s.source]
+        for seg in needle_segs:
+            assert "openai_message" in seg.metadata
+            msg = seg.metadata["openai_message"]
+            assert msg["role"] == "user"
+            assert task.needles[0].content in msg["content"]
+
+    def test_minimal_mode_no_needles_no_noise(self, tmp_path: Path) -> None:
+        """Minimal mode: zero injected segments (no needles, no noise)."""
+        from ctx_rm.benchmarks.runner import AgentLoopRunner
+
+        task = _make_task(tmp_path)
+        runner = AgentLoopRunner(
+            driver_name="llamacpp",
+            task_id="TEST-001",
+            mode="minimal",
+            token_budget=100_000,
+        )
+        bus = runner._create_bus()
+        runner._inject_context(bus, task)
+
+        assert len(bus.active_segments) == 0
 
     @pytest.mark.asyncio
     async def test_ctx_rm_mode_runs_end_to_end(self, tmp_path: Path) -> None:

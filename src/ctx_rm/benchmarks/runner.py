@@ -546,21 +546,18 @@ class AgentLoopRunner:
     # ── System prompt ───────────────────────────────────────────────────
 
     def _build_system_prompt(self, task: "Task") -> str:
-        """Build system prompt from task scenario + needle content."""
-        parts = [
+        """Build system prompt from task scenario only.
+
+        Needles are NOT included here — they're injected as separate,
+        evictable segments via _inject_context(). This ensures the eviction
+        engine is actually tested against needle retention.
+        """
+        return "\n".join([
             "You are a coding agent. Complete the task using the available tools.",
             "",
             "## Task Scenario",
             task.scenario.strip(),
-        ]
-
-        if task.needles:
-            parts.append("")
-            parts.append("## Critical Context")
-            for needle in task.needles:
-                parts.append(f"- [{needle.injection_method}] {needle.content}")
-
-        return "\n".join(parts)
+        ])
 
     def _build_task_instruction(self, task: "Task", working_copy: Path) -> str:
         """Build the user message that starts the agent."""
@@ -574,14 +571,31 @@ class AgentLoopRunner:
     # ── Context injection ──────────────────────────────────────────────
 
     def _inject_context(self, bus: ContextBus, task: "Task") -> None:
-        """Inject noise segments into the bus based on mode.
+        """Inject needles and noise as evictable segments based on mode.
 
-        MINIMAL: no noise, no extra needles
-        FULL and CTX-RM: inject noise as context segments
+        MINIMAL: nothing injected (agent sees only system prompt + task)
+        FULL and CTX-RM: needles + noise injected as CONTEXT segments
         """
         if self.mode == "minimal":
             return
 
+        # Inject needles as evictable context segments
+        for needle in task.needles:
+            seg = Segment(
+                content=needle.content,
+                role=SegmentRole.CONTEXT,
+                token_count=estimate_tokens(needle.content),
+                source=f"needle:{needle.id}",
+                metadata={
+                    "openai_message": {
+                        "role": "user",
+                        "content": f"[context] {needle.content}",
+                    },
+                },
+            )
+            bus.ingest(seg)
+
+        # Inject noise
         for injection in task.context_injections:
             noise = generate_noise(injection.size_tokens, injection.description)
             seg = Segment(
