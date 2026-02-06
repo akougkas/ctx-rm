@@ -29,6 +29,16 @@ logger = structlog.get_logger()
 # Patterns in stderr/error output that indicate transient rate-limit errors
 _RETRYABLE_PATTERNS = ("429", "RESOURCE_EXHAUSTED", "rate")
 
+# Patterns in stderr that are Gemini CLI informational noise, not real errors
+_STDERR_NOISE_PATTERNS = (
+    "YOLO mode is enabled",
+    "Approval mode overridden",
+    "Session cleanup disabled",
+    "Loading extension:",
+    "Loaded cached credentials",
+    "Project context loaded",
+)
+
 
 class GeminiCLIDriver(AgentDriver):
     """Drive Gemini CLI in headless mode via subprocess."""
@@ -62,10 +72,14 @@ class GeminiCLIDriver(AgentDriver):
         with exponential backoff + jitter up to ``max_retries`` times.
         """
         full_prompt = self._build_prompt(prompt, context)
+        # Sanitize: null bytes truncate C-strings in execvp
+        full_prompt = full_prompt.replace("\x00", "")
 
+        # Use --prompt=VALUE (single arg) instead of -p VALUE (two args)
+        # to avoid yargs argument-splitting issues with long prompts
         cmd = [
             "gemini",
-            "-p", full_prompt,
+            f"--prompt={full_prompt}",
             "--output-format", "json",
             "-m", self.model,
         ]
@@ -75,6 +89,7 @@ class GeminiCLIDriver(AgentDriver):
 
         logger.debug("gemini_invoke", model=self.model, prompt_len=len(full_prompt))
 
+        proc = None
         for attempt in range(self.max_retries + 1):
             try:
                 proc = await asyncio.create_subprocess_exec(
@@ -87,6 +102,12 @@ class GeminiCLIDriver(AgentDriver):
                     proc.communicate(), timeout=timeout
                 )
             except TimeoutError:
+                if proc is not None:
+                    proc.kill()
+                    try:
+                        await proc.wait()
+                    except Exception:  # noqa: BLE001
+                        pass
                 logger.error("gemini_timeout", timeout=timeout)
                 return AgentResponse(
                     text="", success=False, error=f"Timeout after {timeout}s"
@@ -99,10 +120,12 @@ class GeminiCLIDriver(AgentDriver):
                 )
 
             if proc.returncode != 0:
-                err = stderr.decode(errors="replace").strip()
+                raw_err = stderr.decode(errors="replace").strip()
+                # Filter out Gemini CLI informational noise from stderr
+                err = self._strip_stderr_noise(raw_err)
 
                 # Check if this is a retryable transient error
-                if attempt < self.max_retries and self._is_retryable(err):
+                if attempt < self.max_retries and err and self._is_retryable(err):
                     delay = (2**attempt) + random.uniform(0, 1)
                     logger.warning(
                         "gemini_retry",
@@ -114,13 +137,14 @@ class GeminiCLIDriver(AgentDriver):
                     await asyncio.sleep(delay)
                     continue
 
+                error_msg = err or raw_err  # Fall back to raw if fully filtered
                 logger.error(
-                    "gemini_error", returncode=proc.returncode, stderr=err[:500]
+                    "gemini_error", returncode=proc.returncode, stderr=error_msg[:500]
                 )
                 return AgentResponse(
                     text="",
                     success=False,
-                    error=f"Exit code {proc.returncode}: {err[:500]}",
+                    error=f"Exit code {proc.returncode}: {error_msg[:500]}",
                 )
 
             return self._parse_json_output(stdout)
@@ -134,11 +158,37 @@ class GeminiCLIDriver(AgentDriver):
         lower = error_text.lower()
         return any(pat.lower() in lower for pat in _RETRYABLE_PATTERNS)
 
+    @staticmethod
+    def _strip_stderr_noise(stderr_text: str) -> str:
+        """Remove known Gemini CLI informational noise from stderr.
+
+        Lines matching noise patterns (YOLO mode, extension loading, etc.)
+        are stripped so they don't trigger false error/retry logic.
+        """
+        lines = stderr_text.splitlines()
+        filtered = [
+            line for line in lines
+            if not any(pat in line for pat in _STDERR_NOISE_PATTERNS)
+        ]
+        return "\n".join(filtered).strip()
+
     async def check_available(self) -> bool:
         """Check if gemini CLI is installed."""
         return shutil.which("gemini") is not None
 
     # ── Internal ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_json(text: str) -> dict | None:
+        """Extract JSON object from text that may have non-JSON prefix/suffix."""
+        json_start = text.find("{")
+        json_end = text.rfind("}")
+        if json_start < 0 or json_end <= json_start:
+            return None
+        try:
+            return orjson.loads(text[json_start : json_end + 1])
+        except orjson.JSONDecodeError:
+            return None
 
     def _build_prompt(self, prompt: str, context: str | None) -> str:
         """Construct the full prompt with context prefix."""
@@ -153,7 +203,11 @@ class GeminiCLIDriver(AgentDriver):
     def _parse_json_output(self, stdout: bytes) -> AgentResponse:
         """Parse Gemini CLI's JSON output format.
 
-        Expected format:
+        Gemini CLI may prefix the JSON with informational noise on stdout
+        (e.g. "Skipping project agents..."). We find the first ``{`` and
+        last ``}`` to extract the JSON object.
+
+        Expected JSON:
         {
           "response": "...",
           "stats": {
@@ -163,12 +217,10 @@ class GeminiCLIDriver(AgentDriver):
           }
         }
         """
-        try:
-            data = orjson.loads(stdout)
-        except orjson.JSONDecodeError:
-            # Fallback: treat as plain text
-            text = stdout.decode(errors="replace").strip()
-            return AgentResponse(text=text, raw_json={})
+        text = stdout.decode(errors="replace")
+        data = self._extract_json(text)
+        if data is None:
+            return AgentResponse(text=text.strip(), raw_json={})
 
         response_text = data.get("response", "")
         stats = data.get("stats", {})
