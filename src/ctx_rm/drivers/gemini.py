@@ -27,7 +27,13 @@ from ctx_rm.drivers.base import AgentDriver, AgentResponse
 logger = structlog.get_logger()
 
 # Patterns in stderr/error output that indicate transient rate-limit errors
-_RETRYABLE_PATTERNS = ("429", "RESOURCE_EXHAUSTED", "rate")
+_RETRYABLE_PATTERNS = (
+    "429",
+    "RESOURCE_EXHAUSTED",
+    "rate",
+    "exhausted your capacity",
+    "quota will reset",
+)
 
 # Patterns in stderr that are Gemini CLI informational noise, not real errors
 _STDERR_NOISE_PATTERNS = (
@@ -37,6 +43,10 @@ _STDERR_NOISE_PATTERNS = (
     "Loading extension:",
     "Loaded cached credentials",
     "Project context loaded",
+    "Project hooks disabled",
+    "Hook registry initialized",
+    "Server '",
+    "supports tool updates",
 )
 
 

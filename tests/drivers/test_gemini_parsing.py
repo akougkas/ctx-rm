@@ -159,6 +159,11 @@ def test_is_retryable() -> None:
     assert GeminiCLIDriver._is_retryable("HTTP 429 Too Many Requests") is True
     assert GeminiCLIDriver._is_retryable("RESOURCE_EXHAUSTED: quota exceeded") is True
     assert GeminiCLIDriver._is_retryable("Rate limit exceeded") is True
+    # Gemini CLI capacity exhaustion errors (most common rate limit form)
+    assert GeminiCLIDriver._is_retryable(
+        "Attempt 1 failed: You have exhausted your capacity on this model. "
+        "Your quota will reset after 0s"
+    ) is True
     assert GeminiCLIDriver._is_retryable("Invalid API key") is False
     assert GeminiCLIDriver._is_retryable("Permission denied") is False
 
@@ -333,6 +338,9 @@ def test_strip_stderr_noise() -> None:
         "Loading extension: chrome-devtools-mcp\n"
         "Loading extension: conductor\n"
         "Loaded cached credentials.\n"
+        "Project hooks disabled because the folder is not trusted.\n"
+        "Hook registry initialized with 0 hook entries\n"
+        "Server 'context7' supports tool updates. Listening for changes...\n"
         "Error: real problem here\n"
     )
     cleaned = driver._strip_stderr_noise(noisy)
@@ -341,4 +349,7 @@ def test_strip_stderr_noise() -> None:
     assert "Session cleanup" not in cleaned
     assert "Loading extension" not in cleaned
     assert "Loaded cached credentials" not in cleaned
+    assert "Project hooks" not in cleaned
+    assert "Hook registry" not in cleaned
+    assert "Server '" not in cleaned
     assert "real problem here" in cleaned
