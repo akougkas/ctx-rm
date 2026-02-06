@@ -297,3 +297,192 @@ async def test_runner_full_mode(driver, tmp_path) -> None:
     assert result.turns >= 1
     # Full mode should have zero evictions (budget is 1M)
     assert result.segments_evicted == 0
+
+
+# ── Eviction pressure tests ─────────────────────────────────────────────
+
+
+def _make_eviction_task(fixture_dir: Path) -> Task:
+    """Task where needle carries the critical detail (port number).
+
+    Scenario is vague — only says to create config.json with app_name.
+    Needle specifies the exact content including port 9876.
+    Without the needle, agent can't know the port number.
+    """
+    return Task(
+        id="EVICT-001",
+        title="eviction_pressure_test",
+        expected_winner="ctx-rm",
+        eviction_pressure="heavy",
+        min_turns=3,
+        repo_fixture=str(fixture_dir),
+        scenario=(
+            "Create a file called config.json in the working directory. "
+            "It must be a valid JSON file with an 'app_name' key."
+        ),
+        needles=[
+            Needle(
+                id="N1",
+                type="fact",
+                injection_turn=1,
+                injection_method="doc_read",
+                content=(
+                    "CRITICAL: The config.json file must contain exactly: "
+                    '{"app_name": "ctx-rm", "port": 9876}'
+                ),
+                risk_if_evicted="Agent won't know the port number.",
+            ),
+        ],
+        context_injections=[
+            ContextInjection(
+                turn=1, type="noise", size_tokens=2000,
+                description="Heavy irrelevant context",
+            ),
+        ],
+        success_criteria=["config.json contains port 9876"],
+        evaluation=[
+            FileContainsCheck(
+                check="file_contains",
+                target="config.json",
+                must_include="9876",
+            ),
+        ],
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_eviction_pressure_ctx_rm(driver, tmp_path) -> None:
+    """Tight budget + heavy noise → eviction MUST fire.
+
+    Honestly reports: did needle survive? did eval pass?
+    Does NOT assert eval passes — HeuristicScorer is blind to content,
+    so needle may be evicted alongside noise. This is expected and proves
+    we need source-aware scoring.
+    """
+    import orjson
+
+    fixture_dir = tmp_path / "fixture"
+    fixture_dir.mkdir()
+    result_dir = tmp_path / "results"
+
+    task = _make_eviction_task(fixture_dir)
+    runner = AgentLoopRunner(
+        driver_name="llamacpp",
+        task_id="EVICT-001",
+        mode="ctx-rm",
+        token_budget=1500,
+        policy_name="lru",
+        output_dir=result_dir,
+        max_turns=10,
+    )
+
+    result = await runner.run_with_task(task=task, working_copy=fixture_dir)
+
+    # Hard assertion: eviction MUST happen with this budget
+    assert result.segments_evicted > 0, (
+        "Budget 1500 with 2000 noise tokens must trigger eviction"
+    )
+
+    # Check needle survival in bus
+    bus = runner._last_bus
+    needle_alive = any("needle" in s.source for s in bus.active_segments)
+    noise_alive = any("noise" in s.source for s in bus.active_segments)
+
+    # Check eval outcome
+    eval_path = result_dir / "EVICT-001" / "ctx-rm" / "llamacpp" / "lru" / "run-1" / "evaluation.json"
+    eval_data = orjson.loads(eval_path.read_bytes())
+
+    print("\n" + "=" * 60)
+    print("EVICTION PRESSURE TEST — CTX-RM MODE (LRU + HeuristicScorer)")
+    print("=" * 60)
+    print(f"  Budget:            1500 tokens")
+    print(f"  Segments evicted:  {result.segments_evicted}")
+    print(f"  Turns:             {result.turns}")
+    print(f"  Tool calls:        {result.tool_calls_made}")
+    print(f"  Needle survived:   {needle_alive}")
+    print(f"  Noise survived:    {noise_alive}")
+    print(f"  Eval passed:       {eval_data['all_passed']}")
+    print(f"  Active tokens:     {bus.active_tokens}/{bus.token_budget}")
+    if not needle_alive:
+        print("  >> NEEDLE EVICTED — proves HeuristicScorer is blind to content")
+        print("  >> Need source-aware scoring to fix this")
+    print("=" * 60)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_eviction_pressure_full_mode(driver, tmp_path) -> None:
+    """Full mode baseline: huge budget, no eviction, needle always visible."""
+    import orjson
+
+    fixture_dir = tmp_path / "fixture"
+    fixture_dir.mkdir()
+    result_dir = tmp_path / "results"
+
+    task = _make_eviction_task(fixture_dir)
+    runner = AgentLoopRunner(
+        driver_name="llamacpp",
+        task_id="EVICT-001",
+        mode="full",
+        output_dir=result_dir,
+        max_turns=10,
+    )
+
+    result = await runner.run_with_task(task=task, working_copy=fixture_dir)
+
+    assert result.segments_evicted == 0, "Full mode must have zero evictions"
+
+    bus = runner._last_bus
+    needle_alive = any("needle" in s.source for s in bus.active_segments)
+
+    eval_path = result_dir / "EVICT-001" / "full" / "llamacpp" / "run-1" / "evaluation.json"
+    eval_data = orjson.loads(eval_path.read_bytes())
+
+    print("\n" + "=" * 60)
+    print("EVICTION PRESSURE TEST — FULL MODE (baseline)")
+    print("=" * 60)
+    print(f"  Segments evicted:  {result.segments_evicted}")
+    print(f"  Turns:             {result.turns}")
+    print(f"  Tool calls:        {result.tool_calls_made}")
+    print(f"  Needle survived:   {needle_alive}")
+    print(f"  Eval passed:       {eval_data['all_passed']}")
+    print(f"  Active tokens:     {bus.active_tokens}/{bus.token_budget}")
+    print("=" * 60)
+
+    assert needle_alive, "Full mode: needle must survive (no eviction)"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_eviction_pressure_minimal_mode(driver, tmp_path) -> None:
+    """Minimal mode: no needle, no noise. Agent has scenario only."""
+    import orjson
+
+    fixture_dir = tmp_path / "fixture"
+    fixture_dir.mkdir()
+    result_dir = tmp_path / "results"
+
+    task = _make_eviction_task(fixture_dir)
+    runner = AgentLoopRunner(
+        driver_name="llamacpp",
+        task_id="EVICT-001",
+        mode="minimal",
+        token_budget=10_000,
+        output_dir=result_dir,
+        max_turns=10,
+    )
+
+    result = await runner.run_with_task(task=task, working_copy=fixture_dir)
+
+    eval_path = result_dir / "EVICT-001" / "minimal" / "llamacpp" / "run-1" / "evaluation.json"
+    eval_data = orjson.loads(eval_path.read_bytes())
+
+    print("\n" + "=" * 60)
+    print("EVICTION PRESSURE TEST — MINIMAL MODE (no context)")
+    print("=" * 60)
+    print(f"  Turns:             {result.turns}")
+    print(f"  Tool calls:        {result.tool_calls_made}")
+    print(f"  Eval passed:       {eval_data['all_passed']}")
+    print("  >> Agent has no needle — must guess port number")
+    print("=" * 60)

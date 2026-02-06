@@ -481,6 +481,7 @@ class AgentLoopRunner:
 
         # Create bus with mode-appropriate budget
         bus = self._create_bus()
+        self._last_bus = bus  # Exposed for test inspection
 
         # Inject context (needles + noise) based on mode
         self._inject_context(bus, task)
