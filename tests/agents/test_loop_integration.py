@@ -533,6 +533,134 @@ async def test_budget_sweep(driver, tmp_path, budget) -> None:
         assert needle_alive, f"Needle should survive at budget {budget}"
 
 
+# ── Policy Comparative Analysis ──────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy_name", ["lru", "clock", "budget", "arc", "innodb"])
+async def test_policy_comparison_evict001(driver, tmp_path, policy_name) -> None:
+    """Run all 5 eviction policies on EVICT-001 at budget=1500.
+
+    Collects: needle retention, eviction count, eval result, active tokens.
+    Only BudgetAwarePolicy uses composite_score — the rest use recency/frequency.
+    """
+    import orjson
+
+    fixture_dir = tmp_path / "fixture"
+    fixture_dir.mkdir()
+    result_dir = tmp_path / "results"
+
+    task = _make_eviction_task(fixture_dir)
+    runner = AgentLoopRunner(
+        driver_name="llamacpp",
+        task_id="EVICT-001",
+        mode="ctx-rm",
+        token_budget=1500,
+        policy_name=policy_name,
+        output_dir=result_dir,
+        max_turns=10,
+    )
+
+    result = await runner.run_with_task(task=task, working_copy=fixture_dir)
+
+    bus = runner._last_bus
+    needle_alive = any("needle" in s.source for s in bus.active_segments)
+    noise_alive = any("noise" in s.source for s in bus.active_segments)
+
+    eval_path = (
+        result_dir / "EVICT-001" / "ctx-rm" / "llamacpp"
+        / policy_name / "run-1" / "evaluation.json"
+    )
+    eval_data = orjson.loads(eval_path.read_bytes())
+
+    print(
+        f"\n  POLICY={policy_name:<8} "
+        f"| evictions={result.segments_evicted} "
+        f"| needle={'ALIVE' if needle_alive else 'DEAD ':>5} "
+        f"| noise={'ALIVE' if noise_alive else 'DEAD ':>5} "
+        f"| eval={'PASS' if eval_data['all_passed'] else 'FAIL'} "
+        f"| active_tok={bus.active_tokens}/{bus.token_budget} "
+        f"| turns={result.turns}"
+    )
+
+    # All policies should trigger eviction at this tight budget
+    assert result.segments_evicted > 0, (
+        f"Policy {policy_name}: budget 1500 with 2000-token noise must trigger eviction"
+    )
+
+    # BudgetAwarePolicy is the only one that uses composite_score
+    if policy_name == "budget":
+        assert needle_alive, (
+            "BudgetAwarePolicy must preserve needle (uses composite_score)"
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "task_factory,task_id",
+    [
+        ("evict", "EVICT-001"),
+        ("integ", "INTEG-001"),
+    ],
+)
+async def test_multi_task_budget_policy(driver, tmp_path, task_factory, task_id) -> None:
+    """BudgetAwarePolicy preserves needles across different task types.
+
+    Validates source-aware scoring generalizes beyond EVICT-001.
+    INTEG-001 has lighter noise (200 tokens) so uses tighter budget.
+    """
+    import orjson
+
+    fixture_dir = tmp_path / "fixture"
+    fixture_dir.mkdir()
+    result_dir = tmp_path / "results"
+
+    if task_factory == "evict":
+        task = _make_eviction_task(fixture_dir)
+        budget = 1500
+    else:
+        task = _make_runner_task(fixture_dir)
+        # Boost noise to 1500 tokens to create real eviction pressure
+        task.context_injections[0].size_tokens = 1500
+        budget = 1000
+
+    runner = AgentLoopRunner(
+        driver_name="llamacpp",
+        task_id=task_id,
+        mode="ctx-rm",
+        token_budget=budget,
+        policy_name="budget",
+        output_dir=result_dir,
+        max_turns=10,
+    )
+
+    result = await runner.run_with_task(task=task, working_copy=fixture_dir)
+
+    bus = runner._last_bus
+    needle_alive = any("needle" in s.source for s in bus.active_segments)
+
+    eval_path = (
+        result_dir / task_id / "ctx-rm" / "llamacpp"
+        / "budget" / "run-1" / "evaluation.json"
+    )
+    eval_data = orjson.loads(eval_path.read_bytes())
+
+    print(
+        f"\n  TASK={task_id:<10} "
+        f"| budget={budget} "
+        f"| evictions={result.segments_evicted} "
+        f"| needle={'ALIVE' if needle_alive else 'DEAD '} "
+        f"| eval={'PASS' if eval_data['all_passed'] else 'FAIL'} "
+        f"| turns={result.turns}"
+    )
+
+    assert needle_alive, (
+        f"BudgetAwarePolicy must preserve needle for {task_id}"
+    )
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_eviction_pressure_minimal_mode(driver, tmp_path) -> None:
