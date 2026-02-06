@@ -6,9 +6,18 @@ Mark: pytest -m integration
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from ctx_rm.agents.loop import AgentLoop
+from ctx_rm.benchmarks.models import (
+    ContextInjection,
+    FileContainsCheck,
+    Needle,
+    Task,
+)
+from ctx_rm.benchmarks.runner import AgentLoopRunner
 from ctx_rm.core.bus import ContextBus
 from ctx_rm.core.graveyard import TieredStore
 from ctx_rm.core.policies.lru import LRUPolicy
@@ -150,3 +159,141 @@ async def test_eviction_with_real_model(driver, tmp_path) -> None:
     assert bus.active_tokens <= bus.headroom_target
     # System prompt must survive (pinned)
     assert any(s.role == SegmentRole.SYSTEM for s in bus.active_segments)
+
+
+# ── AgentLoopRunner integration tests ─────────────────────────────────
+
+
+def _make_runner_task(fixture_dir: Path) -> Task:
+    """Create a task that the agent can solve: write specific content to a file."""
+    return Task(
+        id="INTEG-001",
+        title="integration_write_test",
+        expected_winner="ctx-rm",
+        eviction_pressure="gradual",
+        min_turns=3,
+        repo_fixture=str(fixture_dir),
+        scenario=(
+            "You must write a Python file called result.py in the working directory. "
+            "The file must contain exactly this line: answer = 42"
+        ),
+        needles=[
+            Needle(
+                id="N1",
+                type="fact",
+                injection_turn=1,
+                injection_method="doc_read",
+                content="The variable must be named 'answer' and set to 42.",
+                risk_if_evicted="Agent uses wrong variable name.",
+            ),
+        ],
+        context_injections=[
+            ContextInjection(
+                turn=2,
+                type="noise",
+                size_tokens=200,
+                description="Unrelated debug logs",
+            ),
+        ],
+        success_criteria=["result.py contains answer = 42"],
+        evaluation=[
+            FileContainsCheck(
+                check="file_contains",
+                target="result.py",
+                must_include="answer = 42",
+            ),
+        ],
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_runner_ctx_rm_mode(driver, tmp_path) -> None:
+    """AgentLoopRunner ctx-rm mode: agent writes file, eval checks it."""
+    fixture_dir = tmp_path / "fixture"
+    fixture_dir.mkdir()
+    result_dir = tmp_path / "results"
+
+    task = _make_runner_task(fixture_dir)
+    runner = AgentLoopRunner(
+        driver_name="llamacpp",
+        task_id="INTEG-001",
+        mode="ctx-rm",
+        token_budget=10_000,
+        policy_name="lru",
+        output_dir=result_dir,
+        max_turns=10,
+    )
+
+    result = await runner.run_with_task(
+        task=task,
+        working_copy=fixture_dir,
+    )
+
+    assert result is not None
+    assert result.turns >= 1
+    assert result.tool_calls_made >= 1
+
+    # Evaluation output should exist
+    eval_path = result_dir / "INTEG-001" / "ctx-rm" / "llamacpp" / "lru" / "run-1" / "evaluation.json"
+    assert eval_path.exists()
+
+    import orjson
+    eval_data = orjson.loads(eval_path.read_bytes())
+    # Agent should have written result.py with answer = 42
+    if eval_data["all_passed"]:
+        assert (fixture_dir / "result.py").exists()
+        assert "answer = 42" in (fixture_dir / "result.py").read_text()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_runner_minimal_mode(driver, tmp_path) -> None:
+    """AgentLoopRunner minimal mode: no noise injected."""
+    fixture_dir = tmp_path / "fixture"
+    fixture_dir.mkdir()
+
+    task = _make_runner_task(fixture_dir)
+    runner = AgentLoopRunner(
+        driver_name="llamacpp",
+        task_id="INTEG-001",
+        mode="minimal",
+        token_budget=10_000,
+        output_dir=tmp_path / "results",
+        max_turns=10,
+    )
+
+    result = await runner.run_with_task(
+        task=task,
+        working_copy=fixture_dir,
+    )
+
+    assert result is not None
+    assert result.turns >= 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_runner_full_mode(driver, tmp_path) -> None:
+    """AgentLoopRunner full mode: huge budget, noise injected."""
+    fixture_dir = tmp_path / "fixture"
+    fixture_dir.mkdir()
+
+    task = _make_runner_task(fixture_dir)
+    runner = AgentLoopRunner(
+        driver_name="llamacpp",
+        task_id="INTEG-001",
+        mode="full",
+        output_dir=tmp_path / "results",
+        max_turns=10,
+    )
+
+    result = await runner.run_with_task(
+        task=task,
+        working_copy=fixture_dir,
+    )
+
+    assert result is not None
+    assert result.turns >= 1
+    # Full mode should have zero evictions (budget is 1M)
+    assert result.segments_evicted == 0
