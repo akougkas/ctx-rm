@@ -492,6 +492,49 @@ async def test_eviction_pressure_full_mode(driver, tmp_path) -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+@pytest.mark.parametrize("budget", [500, 1000, 1500, 2000, 5000, 10000])
+async def test_budget_sweep(driver, tmp_path, budget) -> None:
+    """Sweep budgets to find eviction sweet spot with BudgetAwarePolicy."""
+    import orjson
+
+    fixture_dir = tmp_path / "fixture"
+    fixture_dir.mkdir()
+    result_dir = tmp_path / "results"
+
+    task = _make_eviction_task(fixture_dir)
+    runner = AgentLoopRunner(
+        driver_name="llamacpp",
+        task_id="EVICT-001",
+        mode="ctx-rm",
+        token_budget=budget,
+        policy_name="budget",
+        output_dir=result_dir,
+        max_turns=10,
+    )
+
+    result = await runner.run_with_task(task=task, working_copy=fixture_dir)
+
+    bus = runner._last_bus
+    needle_alive = any("needle" in s.source for s in bus.active_segments)
+    noise_alive = any("noise" in s.source for s in bus.active_segments)
+
+    eval_path = result_dir / "EVICT-001" / "ctx-rm" / "llamacpp" / "budget" / "run-1" / "evaluation.json"
+    eval_data = orjson.loads(eval_path.read_bytes())
+
+    print(f"\n  BUDGET={budget:>6} | evictions={result.segments_evicted} "
+          f"| needle={'ALIVE' if needle_alive else 'DEAD ':>5} "
+          f"| noise={'ALIVE' if noise_alive else 'DEAD ':>5} "
+          f"| eval={'PASS' if eval_data['all_passed'] else 'FAIL'} "
+          f"| active_tok={bus.active_tokens}/{budget} "
+          f"| turns={result.turns}")
+
+    # At all budgets, needle should survive with BudgetAwarePolicy
+    if budget >= 500:
+        assert needle_alive, f"Needle should survive at budget {budget}"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_eviction_pressure_minimal_mode(driver, tmp_path) -> None:
     """Minimal mode: no needle, no noise. Agent has scenario only."""
     import orjson
