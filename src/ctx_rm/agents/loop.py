@@ -79,6 +79,7 @@ class AgentLoop:
         self.recall_top_k = recall_top_k
         self._task_text: str = ""  # Set in run(), used as recall query
         self._recalls_made: int = 0
+        self._recalled_ids: set[str] = set()  # Prevent recall thrashing
 
     async def run(self, system_prompt: str, task: str) -> AgentResult:
         """Run the agent loop to completion."""
@@ -157,11 +158,15 @@ class AgentLoop:
 
     # ── Recall ─────────────────────────────────────────────────────────
 
+    # Sources safe for recall (no pair dependencies)
+    _RECALLABLE_SOURCES = frozenset({"needle", "context", "user_task", "user_message"})
+
     def _try_recall(self) -> None:
         """Search evicted segments and recall relevant ones.
 
         Uses the task instruction as a search query against warm + cold tiers.
-        Only runs when enable_recall is True and there are evicted segments.
+        Only recalls segments with safe sources (no assistant/tool pairs).
+        Runs once per segment — recalled IDs are tracked to prevent thrashing.
         """
         if not self.enable_recall:
             return
@@ -172,9 +177,19 @@ class AgentLoop:
 
         results = self.bus.search_evicted(self._task_text, top_k=self.recall_top_k)
         for seg in results:
+            # Skip already-recalled segments (prevent thrashing)
+            if seg.seg_id in self._recalled_ids:
+                continue
+
+            # Only recall safe sources (skip assistant/tool — pair integrity)
+            source_prefix = (seg.source or "").split(":")[0]
+            if source_prefix not in self._RECALLABLE_SOURCES:
+                continue
+
             recalled = self.bus.recall(seg.seg_id)
             if recalled is not None:
                 self._recalls_made += 1
+                self._recalled_ids.add(recalled.seg_id)
                 logger.info(
                     "recall_triggered",
                     seg_id=recalled.seg_id,

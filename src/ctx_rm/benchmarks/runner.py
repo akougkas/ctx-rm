@@ -422,6 +422,7 @@ class AgentLoopRunner:
         fixtures_root: Path = Path("benchmarks/fixtures"),
         run_index: int = 1,
         max_turns: int = 30,
+        enable_recall: bool = False,
     ) -> None:
         self.driver_name = driver_name
         self.task_id = task_id
@@ -433,6 +434,7 @@ class AgentLoopRunner:
         self.fixtures_root = fixtures_root
         self.run_index = run_index
         self.max_turns = max_turns
+        self.enable_recall = enable_recall
 
     async def run(self) -> None:
         """Load task, create fixture, run agent, evaluate."""
@@ -496,6 +498,7 @@ class AgentLoopRunner:
             bus=bus,
             working_dir=str(working_copy),
             max_turns=self.max_turns,
+            enable_recall=self.enable_recall,
         )
 
         result = await loop.run(system_prompt, task_instruction)
@@ -528,6 +531,7 @@ class AgentLoopRunner:
                 "prompt_tokens": result.total_prompt_tokens,
                 "completion_tokens": result.total_completion_tokens,
                 "segments_evicted": result.segments_evicted,
+                "recalls_made": result.recalls_made,
             },
         }
         (result_dir / "evaluation.json").write_bytes(

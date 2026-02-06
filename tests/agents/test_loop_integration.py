@@ -661,6 +661,60 @@ async def test_multi_task_budget_policy(driver, tmp_path, task_factory, task_id)
     )
 
 
+# ── Recall integration tests ─────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_recall_lru_restores_needle(driver, tmp_path) -> None:
+    """LRU + recall: needle evicted then recalled → eval PASS.
+
+    Contrast with test_policy_comparison_evict001[lru] where LRU without
+    recall evicts the needle and eval FAILS. Here recall brings it back.
+    """
+    import orjson
+
+    fixture_dir = tmp_path / "fixture"
+    fixture_dir.mkdir()
+    result_dir = tmp_path / "results"
+
+    task = _make_eviction_task(fixture_dir)
+    runner = AgentLoopRunner(
+        driver_name="llamacpp",
+        task_id="EVICT-001",
+        mode="ctx-rm",
+        token_budget=1500,
+        policy_name="lru",
+        output_dir=result_dir,
+        max_turns=10,
+        enable_recall=True,
+    )
+
+    result = await runner.run_with_task(task=task, working_copy=fixture_dir)
+
+    bus = runner._last_bus
+    needle_alive = any("needle" in s.source for s in bus.active_segments)
+
+    eval_path = (
+        result_dir / "EVICT-001" / "ctx-rm" / "llamacpp"
+        / "lru" / "run-1" / "evaluation.json"
+    )
+    eval_data = orjson.loads(eval_path.read_bytes())
+
+    print("\n" + "=" * 60)
+    print("RECALL TEST: LRU + recall enabled")
+    print("=" * 60)
+    print(f"  Segments evicted:  {result.segments_evicted}")
+    print(f"  Recalls made:      {result.recalls_made}")
+    print(f"  Needle survived:   {needle_alive}")
+    print(f"  Eval passed:       {eval_data['all_passed']}")
+    print(f"  Active tokens:     {bus.active_tokens}/{bus.token_budget}")
+    print("=" * 60)
+
+    assert result.recalls_made >= 1, "Recall should have fired"
+    assert needle_alive, "Recalled needle must be in active context"
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_eviction_pressure_minimal_mode(driver, tmp_path) -> None:
