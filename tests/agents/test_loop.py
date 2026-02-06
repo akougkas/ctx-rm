@@ -12,6 +12,7 @@ from ctx_rm.core.graveyard import TieredStore
 from ctx_rm.core.policies.lru import LRUPolicy
 from ctx_rm.core.segment import SegmentRole
 from ctx_rm.drivers.llamacpp import ChatResponse, ToolCall
+from ctx_rm.watch.watcher import WatcherConfig
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -263,3 +264,40 @@ async def test_result_structure(tmp_path) -> None:
     assert isinstance(result.segments_evicted, int)
     assert isinstance(result.bus_stats, dict)
     assert "active_tokens" in result.bus_stats
+
+
+# ── Watcher integration ────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_watcher_runs_during_loop(tmp_path) -> None:
+    """When watcher_config is provided, watcher runs and stops cleanly."""
+    bus = _bus(budget=250, headroom=0.2)
+    responses = [
+        _tool("run_shell", {"command": f"echo {'x' * 80}"}, call_id=f"c{i}")
+        for i in range(4)
+    ]
+    responses.append(_text("done"))
+
+    driver = MockDriver(responses)
+    watcher_cfg = WatcherConfig(interval_seconds=0.1)
+    loop = AgentLoop(
+        driver=driver, bus=bus, working_dir=str(tmp_path),
+        max_turns=5, watcher_config=watcher_cfg,
+    )
+
+    result = await loop.run("sys", "task")
+    assert result.final_response == "done"
+    assert result.watcher_stats is not None
+    assert "cycles_run" in result.watcher_stats
+
+
+@pytest.mark.asyncio
+async def test_no_watcher_by_default(tmp_path) -> None:
+    """Without watcher_config, watcher_stats is None."""
+    bus = _bus()
+    driver = MockDriver([_text("ok")])
+    loop = AgentLoop(driver=driver, bus=bus, working_dir=str(tmp_path))
+
+    result = await loop.run("sys", "task")
+    assert result.watcher_stats is None

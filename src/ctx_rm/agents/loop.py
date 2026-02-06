@@ -8,6 +8,7 @@ linked via pair_group and evicted together to maintain protocol integrity.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -20,6 +21,7 @@ from ctx_rm.core.bus import ContextBus
 from ctx_rm.core.segment import Segment, SegmentRole
 from ctx_rm.core.tokenizer import estimate_tokens
 from ctx_rm.drivers.llamacpp import ChatResponse, ToolCall
+from ctx_rm.watch.watcher import Watcher, WatcherConfig
 
 logger = structlog.get_logger()
 
@@ -46,6 +48,7 @@ class AgentResult:
     tool_calls_made: int
     segments_evicted: int
     bus_stats: dict[str, Any]
+    watcher_stats: dict[str, Any] | None = None
 
 
 class AgentLoop:
@@ -62,11 +65,13 @@ class AgentLoop:
         bus: ContextBus,
         working_dir: str,
         max_turns: int = 20,
+        watcher_config: WatcherConfig | None = None,
     ) -> None:
         self.driver = driver
         self.bus = bus
         self.tool_executor = ToolExecutor(working_dir)
         self.max_turns = max_turns
+        self.watcher_config = watcher_config
 
     async def run(self, system_prompt: str, task: str) -> AgentResult:
         """Run the agent loop to completion."""
@@ -74,39 +79,54 @@ class AgentLoop:
         total_completion = 0
         tool_calls_made = 0
 
-        self._ingest_system(system_prompt)
-        self._ingest_user(task)
+        # Start optional background watcher
+        watcher: Watcher | None = None
+        watcher_task: asyncio.Task | None = None
+        if self.watcher_config is not None:
+            watcher = Watcher(self.bus, self.watcher_config)
+            watcher_task = asyncio.create_task(watcher.run())
 
-        for turn in range(self.max_turns):
-            self.bus.advance_turn()
+        try:
+            self._ingest_system(system_prompt)
+            self._ingest_user(task)
 
-            messages = self._render_messages()
-            response = await self.driver.chat(messages, tools=TOOL_DEFINITIONS)
+            for turn in range(self.max_turns):
+                self.bus.advance_turn()
 
-            total_prompt += response.prompt_tokens
-            total_completion += response.completion_tokens
+                messages = self._render_messages()
+                response = await self.driver.chat(messages, tools=TOOL_DEFINITIONS)
 
-            if response.tool_calls:
-                pair_group = uuid.uuid4().hex[:8]
-                self._ingest_assistant_tool_calls(response, pair_group)
+                total_prompt += response.prompt_tokens
+                total_completion += response.completion_tokens
 
-                for tc in response.tool_calls:
-                    result = await self.tool_executor.execute(tc.name, tc.arguments)
-                    self._ingest_tool_result(tc, result, pair_group)
-                    tool_calls_made += 1
+                if response.tool_calls:
+                    pair_group = uuid.uuid4().hex[:8]
+                    self._ingest_assistant_tool_calls(response, pair_group)
 
-                self._cleanup_orphaned_pairs()
-            else:
-                self._ingest_assistant_text(response)
-                return self._build_result(
-                    response.content, turn + 1,
-                    total_prompt, total_completion, tool_calls_made,
-                )
+                    for tc in response.tool_calls:
+                        result = await self.tool_executor.execute(tc.name, tc.arguments)
+                        self._ingest_tool_result(tc, result, pair_group)
+                        tool_calls_made += 1
 
-        return self._build_result(
-            None, self.max_turns,
-            total_prompt, total_completion, tool_calls_made,
-        )
+                    self._cleanup_orphaned_pairs()
+                else:
+                    self._ingest_assistant_text(response)
+                    return self._build_result(
+                        response.content, turn + 1,
+                        total_prompt, total_completion, tool_calls_made,
+                        watcher,
+                    )
+
+            return self._build_result(
+                None, self.max_turns,
+                total_prompt, total_completion, tool_calls_made,
+                watcher,
+            )
+        finally:
+            if watcher is not None:
+                watcher.stop()
+            if watcher_task is not None:
+                await watcher_task
 
     # ── Rendering ────────────────────────────────────────────────────────
 
@@ -258,6 +278,7 @@ class AgentLoop:
         prompt_tokens: int,
         completion_tokens: int,
         tool_calls_made: int,
+        watcher: Watcher | None = None,
     ) -> AgentResult:
         stats = self.bus.get_stats()
         store = stats["store_stats"]
@@ -270,4 +291,5 @@ class AgentLoop:
             tool_calls_made=tool_calls_made,
             segments_evicted=evicted,
             bus_stats=stats,
+            watcher_stats=watcher.get_stats() if watcher is not None else None,
         )
