@@ -82,6 +82,9 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "integration: requires real llama-server on mini:8080",
+]
 
 [tool.mypy]
 python_version = "3.12"
