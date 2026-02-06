@@ -439,19 +439,31 @@ class TieredStore:
     def search_all(self, query: str, top_k: int = 5) -> list[Segment]:
         """Search all non-active tiers (warm + cold) for matching segments.
 
-        Warm is searched by keyword substring match.
+        Warm is searched by word overlap (any query word in content).
         Cold is searched by embedding similarity (or keyword fallback).
-        Results are merged and deduplicated, warm matches first.
+        Results are merged and deduplicated, warm matches ranked by overlap.
         """
-        query_lower = query.lower()
+        # Extract meaningful query words (3+ chars to skip noise)
+        query_words = {
+            w for w in query.lower().split() if len(w) >= 3
+        }
+
         results: list[Segment] = []
         seen: set[str] = set()
 
-        # Search warm (keyword match on content)
+        # Search warm (word overlap on content)
+        warm_scored: list[tuple[int, Segment]] = []
         for seg in self.warm._store.values():
-            if query_lower in seg.content.lower():
-                results.append(seg)
-                seen.add(seg.seg_id)
+            content_lower = seg.content.lower()
+            overlap = sum(1 for w in query_words if w in content_lower)
+            if overlap > 0:
+                warm_scored.append((overlap, seg))
+
+        # Sort by overlap descending
+        warm_scored.sort(key=lambda x: x[0], reverse=True)
+        for _, seg in warm_scored:
+            results.append(seg)
+            seen.add(seg.seg_id)
 
         # Search cold (embedding or keyword)
         cold_results = self.cold.search(query, top_k=top_k)

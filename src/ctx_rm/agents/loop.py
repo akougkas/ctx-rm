@@ -49,6 +49,7 @@ class AgentResult:
     segments_evicted: int
     bus_stats: dict[str, Any]
     watcher_stats: dict[str, Any] | None = None
+    recalls_made: int = 0
 
 
 class AgentLoop:
@@ -66,12 +67,18 @@ class AgentLoop:
         working_dir: str,
         max_turns: int = 20,
         watcher_config: WatcherConfig | None = None,
+        enable_recall: bool = False,
+        recall_top_k: int = 1,
     ) -> None:
         self.driver = driver
         self.bus = bus
         self.tool_executor = ToolExecutor(working_dir)
         self.max_turns = max_turns
         self.watcher_config = watcher_config
+        self.enable_recall = enable_recall
+        self.recall_top_k = recall_top_k
+        self._task_text: str = ""  # Set in run(), used as recall query
+        self._recalls_made: int = 0
 
     async def run(self, system_prompt: str, task: str) -> AgentResult:
         """Run the agent loop to completion."""
@@ -87,11 +94,13 @@ class AgentLoop:
             watcher_task = asyncio.create_task(watcher.run())
 
         try:
+            self._task_text = task
             self._ingest_system(system_prompt)
             self._ingest_user(task)
 
             for turn in range(self.max_turns):
                 self.bus.advance_turn()
+                self._try_recall()
 
                 messages = self._render_messages()
                 response = await self.driver.chat(messages, tools=TOOL_DEFINITIONS)
@@ -145,6 +154,33 @@ class AgentLoop:
             else:
                 rest.append(msg)
         return system + rest
+
+    # ── Recall ─────────────────────────────────────────────────────────
+
+    def _try_recall(self) -> None:
+        """Search evicted segments and recall relevant ones.
+
+        Uses the task instruction as a search query against warm + cold tiers.
+        Only runs when enable_recall is True and there are evicted segments.
+        """
+        if not self.enable_recall:
+            return
+
+        store_stats = self.bus.store.get_stats()
+        if store_stats["warm_count"] + store_stats["cold_count"] == 0:
+            return
+
+        results = self.bus.search_evicted(self._task_text, top_k=self.recall_top_k)
+        for seg in results:
+            recalled = self.bus.recall(seg.seg_id)
+            if recalled is not None:
+                self._recalls_made += 1
+                logger.info(
+                    "recall_triggered",
+                    seg_id=recalled.seg_id,
+                    source=recalled.source,
+                    tokens=recalled.token_count,
+                )
 
     # ── Ingestion helpers ────────────────────────────────────────────────
 
@@ -304,4 +340,5 @@ class AgentLoop:
             segments_evicted=evicted,
             bus_stats=stats,
             watcher_stats=watcher.get_stats() if watcher is not None else None,
+            recalls_made=self._recalls_made,
         )

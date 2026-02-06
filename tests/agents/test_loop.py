@@ -344,3 +344,140 @@ async def test_message_ordering_system_first(tmp_path) -> None:
     assert sent[0]["role"] == "system", (
         f"First message must be system, got: {sent[0]['role']}"
     )
+
+
+# ── Recall trigger ───────────────────────────────────────────────────────
+
+
+def _bus_with_embedding(budget: int = 10_000, headroom: float = 0.15) -> ContextBus:
+    from ctx_rm.core.embedding import HashingEmbeddingProvider
+
+    return ContextBus(
+        token_budget=budget,
+        store=TieredStore(embedding_provider=HashingEmbeddingProvider()),
+        policy=LRUPolicy(),
+        headroom_ratio=headroom,
+    )
+
+
+@pytest.mark.asyncio
+async def test_recall_restores_evicted_needle(tmp_path) -> None:
+    """With enable_recall, evicted needle is recalled back to active.
+
+    Scenario:
+    1. Inject needle + heavy noise into bus (pre-run, like the runner does)
+    2. Tight budget forces eviction (needle evicted by LRU — oldest first)
+    3. Recall trigger fires on next turn, searches warm, finds needle
+    4. Needle is recalled to active before next LLM call
+    """
+    from ctx_rm.core.segment import Segment
+    from ctx_rm.core.tokenizer import estimate_tokens
+
+    bus = _bus_with_embedding(budget=200, headroom=0.2)
+    # headroom target = 200 * 0.8 = 160 tokens
+
+    # Pre-inject needle (first — becomes oldest for LRU)
+    needle_content = "CRITICAL: The config must contain port 9876"
+    needle = Segment(
+        content=needle_content,
+        role=SegmentRole.CONTEXT,
+        token_count=50,  # Fixed size
+        source="needle:N1",
+        metadata={
+            "openai_message": {
+                "role": "user",
+                "content": f"[context] {needle_content}",
+            },
+        },
+    )
+    bus.ingest(needle)
+    needle_id = needle.seg_id
+
+    # Inject noise that will push past budget when combined with system+user
+    noise = Segment(
+        content="Unrelated debug logs and verbose output " * 10,
+        role=SegmentRole.CONTEXT,
+        token_count=100,  # Fixed size
+        source="noise:debug_logs",
+        metadata={
+            "openai_message": {
+                "role": "user",
+                "content": "[context] Unrelated debug logs " * 10,
+            },
+        },
+    )
+    bus.ingest(noise)
+
+    # After system(pinned) + user + needle(50) + noise(100) = ~170+
+    # Exceeds headroom_target=160, LRU evicts oldest unpinned (needle)
+
+    # Driver returns text response — single turn
+    driver = MockDriver([_text("Done.")])
+
+    loop = AgentLoop(
+        driver=driver,
+        bus=bus,
+        working_dir=str(tmp_path),
+        max_turns=5,
+        enable_recall=True,
+    )
+
+    result = await loop.run(
+        "You are a coding agent.",
+        "Create config.json with the correct port number.",
+    )
+
+    # Needle should have been evicted by budget pressure then recalled
+    active_ids = {s.seg_id for s in bus.active_segments}
+    assert needle_id in active_ids, (
+        "Recall should have restored needle to active context"
+    )
+    assert needle.recalled_at is not None, "Needle should have recalled_at timestamp"
+    assert result.recalls_made >= 1, "At least 1 recall should have fired"
+
+
+@pytest.mark.asyncio
+async def test_recall_disabled_by_default(tmp_path) -> None:
+    """Without enable_recall, evicted needle stays evicted."""
+    from ctx_rm.core.segment import Segment
+
+    bus = _bus_with_embedding(budget=200, headroom=0.2)
+
+    needle_content = "CRITICAL: The config must contain port 9876"
+    needle = Segment(
+        content=needle_content,
+        role=SegmentRole.CONTEXT,
+        token_count=50,
+        source="needle:N1",
+        metadata={
+            "openai_message": {
+                "role": "user",
+                "content": f"[context] {needle_content}",
+            },
+        },
+    )
+    bus.ingest(needle)
+    needle_id = needle.seg_id
+
+    # Heavy noise to force eviction
+    noise = Segment(
+        content="Verbose output " * 20,
+        role=SegmentRole.CONTEXT,
+        token_count=100,
+        source="noise:verbose",
+        metadata={
+            "openai_message": {"role": "user", "content": "Verbose output " * 20},
+        },
+    )
+    bus.ingest(noise)
+
+    driver = MockDriver([_text("Done.")])
+    loop = AgentLoop(driver=driver, bus=bus, working_dir=str(tmp_path))
+
+    result = await loop.run("You are a coding agent.", "Create config.json with the correct port number.")
+
+    # Needle should be evicted (budget pressure) and NOT recalled
+    active_ids = {s.seg_id for s in bus.active_segments}
+    if needle_id not in active_ids:
+        assert needle.recalled_at is None, "Recall should not fire when disabled"
+    assert result.recalls_made == 0
