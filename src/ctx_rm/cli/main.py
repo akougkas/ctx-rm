@@ -208,6 +208,12 @@ def bench(
     output: Annotated[Path, typer.Option(
         help="Output directory for results.",
     )] = Path("./results"),
+    run_index: Annotated[int, typer.Option(
+        help="Run repetition index (1, 2, 3...).",
+    )] = 1,
+    model: Annotated[str | None, typer.Option(
+        help="Override model name (sets CTX_RM_GEMINI_MODEL).",
+    )] = None,
     all_tasks: Annotated[bool, typer.Option(
         "--all", help="Run all tasks x modes x available drivers.",
     )] = False,
@@ -221,6 +227,10 @@ def bench(
 
     # Apply scorer override to config env before runner reads it
     os.environ["CTX_RM_SCORER"] = scorer.value
+
+    # Apply model override if provided
+    if model is not None:
+        os.environ["CTX_RM_GEMINI_MODEL"] = model
 
     if all_tasks:
         _run_batch(policy=policy, budget=budget, output=output, scorer=scorer)
@@ -237,6 +247,7 @@ def bench(
         header.append(f"  policy={policy.value}", style="yellow")
         header.append(f"  scorer={scorer.value}", style="magenta")
     header.append(f"  budget={budget:,}", style="dim")
+    header.append(f"  run={run_index}", style="dim")
     console.print(header)
     console.print()
 
@@ -247,10 +258,15 @@ def bench(
         token_budget=budget,
         policy_name=policy.value,
         output_dir=output,
+        run_index=run_index,
     )
     asyncio.run(runner.run())
 
-    result_dir = output / task / mode.value / driver.value
+    # Compute result_dir matching runner's path construction
+    if mode == Mode.ctx_rm:
+        result_dir = output / task / "ctx-rm" / driver.value / policy.value / f"run-{run_index}"
+    else:
+        result_dir = output / task / mode.value / driver.value / f"run-{run_index}"
     if (result_dir / "evaluation.json").exists():
         import orjson
 

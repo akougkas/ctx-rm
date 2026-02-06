@@ -49,13 +49,13 @@ def _make_runner(tmp_path: Path, mode: str = "minimal") -> tuple[BenchmarkRunner
 def test_run_creates_nested_output_dir(tmp_path: Path) -> None:
     runner, _ = _make_runner(tmp_path, mode="minimal")
     asyncio.run(runner.run())
-    assert (tmp_path / "CR-001" / "minimal" / "gemini").is_dir()
+    assert (tmp_path / "CR-001" / "minimal" / "gemini" / "run-1").is_dir()
 
 
 def test_run_writes_metrics_json(tmp_path: Path) -> None:
     runner, _ = _make_runner(tmp_path, mode="minimal")
     asyncio.run(runner.run())
-    metrics_path = tmp_path / "CR-001" / "minimal" / "gemini" / "metrics.json"
+    metrics_path = tmp_path / "CR-001" / "minimal" / "gemini" / "run-1" / "metrics.json"
     assert metrics_path.exists()
     data = orjson.loads(metrics_path.read_bytes())
     assert "summary" in data
@@ -64,7 +64,7 @@ def test_run_writes_metrics_json(tmp_path: Path) -> None:
 def test_run_writes_evaluation_json(tmp_path: Path) -> None:
     runner, _ = _make_runner(tmp_path, mode="minimal")
     asyncio.run(runner.run())
-    eval_path = tmp_path / "CR-001" / "minimal" / "gemini" / "evaluation.json"
+    eval_path = tmp_path / "CR-001" / "minimal" / "gemini" / "run-1" / "evaluation.json"
     assert eval_path.exists()
     data = orjson.loads(eval_path.read_bytes())
     assert data["task_id"] == "CR-001"
@@ -75,7 +75,7 @@ def test_run_writes_evaluation_json(tmp_path: Path) -> None:
 def test_run_writes_response_log(tmp_path: Path) -> None:
     runner, _ = _make_runner(tmp_path, mode="minimal")
     asyncio.run(runner.run())
-    log_path = tmp_path / "CR-001" / "minimal" / "gemini" / "response_log.jsonl"
+    log_path = tmp_path / "CR-001" / "minimal" / "gemini" / "run-1" / "response_log.jsonl"
     assert log_path.exists()
     lines = log_path.read_text().strip().splitlines()
     # CR-001 has min_turns=20
@@ -101,7 +101,7 @@ def test_fixture_cleanup_after_run(tmp_path: Path) -> None:
 def test_full_mode_runs(tmp_path: Path) -> None:
     runner, _ = _make_runner(tmp_path, mode="full")
     asyncio.run(runner.run())
-    result_dir = tmp_path / "CR-001" / "full" / "gemini"
+    result_dir = tmp_path / "CR-001" / "full" / "gemini" / "run-1"
     assert (result_dir / "metrics.json").exists()
     assert (result_dir / "evaluation.json").exists()
     assert (result_dir / "response_log.jsonl").exists()
@@ -123,7 +123,7 @@ def test_response_log_entries_have_all_fields(tmp_path: Path) -> None:
     """Verify every JSONL entry contains the full schema."""
     runner, _ = _make_runner(tmp_path, mode="full")
     asyncio.run(runner.run())
-    log_path = tmp_path / "CR-001" / "full" / "gemini" / "response_log.jsonl"
+    log_path = tmp_path / "CR-001" / "full" / "gemini" / "run-1" / "response_log.jsonl"
     expected_keys = {
         "turn", "prompt_len", "response_text", "prompt_tokens",
         "completion_tokens", "tool_calls", "elapsed_ms", "success", "timestamp",
@@ -169,7 +169,7 @@ def test_ctx_rm_mode_with_mock_driver(tmp_path: Path) -> None:
     )
     asyncio.run(runner.run())
 
-    result_dir = tmp_path / "CR-001" / "ctx-rm" / "mock"
+    result_dir = tmp_path / "CR-001" / "ctx-rm" / "mock" / "budget" / "run-1"
     assert result_dir.is_dir()
 
     # metrics.json
@@ -222,7 +222,7 @@ def test_ctx_rm_mode_produces_evaluation_checks(tmp_path: Path) -> None:
     )
     asyncio.run(runner.run())
 
-    result_dir = tmp_path / "CR-001" / "ctx-rm" / "mock"
+    result_dir = tmp_path / "CR-001" / "ctx-rm" / "mock" / "budget" / "run-1"
     eval_data = orjson.loads((result_dir / "evaluation.json").read_bytes())
     checks = eval_data["checks"]
 
@@ -247,3 +247,49 @@ def test_ctx_rm_mode_produces_evaluation_checks(tmp_path: Path) -> None:
     auth_check = [c for c in checks if c["target"] == "src/auth/legacy.py"]
     assert len(auth_check) == 1
     assert auth_check[0]["passed"] is True
+
+
+# ── run_index and policy path tests ────────────────────────────────────────
+
+
+def test_run_index_creates_separate_dirs(tmp_path: Path) -> None:
+    """Repeated runs with different run_index produce separate directories."""
+    for idx in (1, 2):
+        runner = BenchmarkRunner(
+            driver_name="gemini",
+            task_id="CR-001",
+            mode="minimal",
+            output_dir=tmp_path,
+            yaml_path=YAML_PATH,
+            fixtures_root=FIXTURES_ROOT,
+            run_index=idx,
+        )
+        mock_driver = _make_mock_driver()
+        runner._create_driver = lambda: mock_driver  # type: ignore[assignment]
+        asyncio.run(runner.run())
+
+    dir_1 = tmp_path / "CR-001" / "minimal" / "gemini" / "run-1"
+    dir_2 = tmp_path / "CR-001" / "minimal" / "gemini" / "run-2"
+    assert dir_1.is_dir()
+    assert dir_2.is_dir()
+    assert (dir_1 / "metrics.json").exists()
+    assert (dir_2 / "metrics.json").exists()
+
+
+def test_ctx_rm_mode_includes_policy_in_path(tmp_path: Path) -> None:
+    """ctx-rm mode result path includes the policy name."""
+    runner = BenchmarkRunner(
+        driver_name="mock",
+        task_id="CR-001",
+        mode="ctx-rm",
+        policy_name="arc",
+        output_dir=tmp_path,
+        yaml_path=YAML_PATH,
+        fixtures_root=FIXTURES_ROOT,
+    )
+    asyncio.run(runner.run())
+
+    result_dir = tmp_path / "CR-001" / "ctx-rm" / "mock" / "arc" / "run-1"
+    assert result_dir.is_dir()
+    assert (result_dir / "metrics.json").exists()
+    assert (result_dir / "evaluation.json").exists()

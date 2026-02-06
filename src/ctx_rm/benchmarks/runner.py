@@ -76,6 +76,7 @@ class BenchmarkRunner:
         output_dir: Path = Path("./results"),
         yaml_path: Path = Path("docs/context_removal_benchmark_tasks.yaml"),
         fixtures_root: Path = Path("benchmarks/fixtures"),
+        run_index: int = 1,
     ) -> None:
         self.driver_name = driver_name
         self.task_id = task_id
@@ -85,6 +86,7 @@ class BenchmarkRunner:
         self.output_dir = output_dir
         self.yaml_path = yaml_path
         self.fixtures_root = fixtures_root
+        self.run_index = run_index
 
     async def run(self) -> None:
         """Execute the benchmark."""
@@ -97,8 +99,17 @@ class BenchmarkRunner:
         fm = FixtureManager(self.fixtures_root)
         working_copy = fm.create_working_copy(fixture_name)
 
-        # Create nested output directory
-        result_dir = self.output_dir / self.task_id / self.mode / self.driver_name
+        # Create nested output directory with run index
+        if self.mode == "ctx-rm":
+            result_dir = (
+                self.output_dir / self.task_id / "ctx-rm" / self.driver_name
+                / self.policy_name / f"run-{self.run_index}"
+            )
+        else:
+            result_dir = (
+                self.output_dir / self.task_id / self.mode / self.driver_name
+                / f"run-{self.run_index}"
+            )
         result_dir.mkdir(parents=True, exist_ok=True)
 
         # Build turns from task definition
@@ -175,7 +186,7 @@ class BenchmarkRunner:
         """Mode B: Greedy ingest + ctx-rm background removal."""
         embedding_provider = HashingEmbeddingProvider()
         store = TieredStore(
-            db_path=self.output_dir / f"{self.task_id}_store.db",
+            db_path=self.output_dir / f"{self.task_id}_{self.policy_name}_run{self.run_index}_store.db",
             embedding_provider=embedding_provider,
         )
         policy = self._create_policy()
@@ -327,10 +338,11 @@ class BenchmarkRunner:
     # ── Helpers ──────────────────────────────────────────────────────────
 
     def _create_driver(self) -> AgentDriver:
+        config = CtxRmConfig()
         if self.driver_name == "gemini":
-            return GeminiCLIDriver()
+            return GeminiCLIDriver(model=config.gemini_model)
         elif self.driver_name == "claude":
-            return ClaudeCodeDriver()
+            return ClaudeCodeDriver(model=config.claude_model)
         elif self.driver_name == "mock":
             from ctx_rm.drivers.mock import MockDriver
 
