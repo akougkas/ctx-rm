@@ -72,11 +72,13 @@ def test_bench_single_run_no_working_dir(mock_runner_cls: MagicMock) -> None:
 
 @patch("ctx_rm.drivers.gemini.GeminiCLIDriver.check_available", new_callable=AsyncMock, return_value=True)
 @patch("ctx_rm.drivers.claude.ClaudeCodeDriver.check_available", new_callable=AsyncMock, return_value=False)
+@patch("ctx_rm.drivers.llamacpp.LlamaCppDriver.check_available", new_callable=AsyncMock, return_value=False)
 @patch("ctx_rm.benchmarks.loader.TaskLoader.list_task_ids", return_value=["CR-001", "CR-002"])
 @patch("ctx_rm.benchmarks.runner.BenchmarkRunner")
 def test_bench_all_flag_iterates_combinations(
     mock_runner_cls: MagicMock,
     _mock_loader: MagicMock,
+    _mock_llamacpp: AsyncMock,
     _mock_claude: AsyncMock,
     _mock_gemini: AsyncMock,
 ) -> None:
@@ -87,7 +89,7 @@ def test_bench_all_flag_iterates_combinations(
 
     result = runner.invoke(app, ["bench", "--all"])
     assert result.exit_code == 0, result.output
-    # 2 tasks x 3 modes x 1 driver = 6 calls
+    # 2 tasks x 3 modes x 1 driver (gemini) = 6 calls
     assert mock_runner_cls.call_count == 6
     assert "Batch complete" in result.output
     assert "6/6" in result.output
@@ -95,11 +97,13 @@ def test_bench_all_flag_iterates_combinations(
 
 @patch("ctx_rm.drivers.gemini.GeminiCLIDriver.check_available", new_callable=AsyncMock, return_value=False)
 @patch("ctx_rm.drivers.claude.ClaudeCodeDriver.check_available", new_callable=AsyncMock, return_value=False)
+@patch("ctx_rm.drivers.llamacpp.LlamaCppDriver.check_available", new_callable=AsyncMock, return_value=False)
 @patch("ctx_rm.benchmarks.loader.TaskLoader.list_task_ids", return_value=["CR-001"])
 @patch("ctx_rm.benchmarks.runner.BenchmarkRunner")
 def test_bench_all_skips_unavailable_drivers(
     mock_runner_cls: MagicMock,
     _mock_loader: MagicMock,
+    _mock_llamacpp: AsyncMock,
     _mock_claude: AsyncMock,
     _mock_gemini: AsyncMock,
 ) -> None:
@@ -308,6 +312,33 @@ def test_info_shows_version_and_components() -> None:
 
 
 # ── llamacpp driver routing ─────────────────────────────────────────────────
+
+
+@patch("ctx_rm.drivers.gemini.GeminiCLIDriver.check_available", new_callable=AsyncMock, return_value=False)
+@patch("ctx_rm.drivers.claude.ClaudeCodeDriver.check_available", new_callable=AsyncMock, return_value=False)
+@patch("ctx_rm.drivers.llamacpp.LlamaCppDriver.check_available", new_callable=AsyncMock, return_value=True)
+@patch("ctx_rm.benchmarks.loader.TaskLoader.list_task_ids", return_value=["CR-001"])
+@patch("ctx_rm.benchmarks.runner.AgentLoopRunner")
+def test_bench_all_uses_agent_loop_runner_for_llamacpp(
+    mock_agent_runner_cls: MagicMock,
+    _mock_loader: MagicMock,
+    _mock_llamacpp: AsyncMock,
+    _mock_claude: AsyncMock,
+    _mock_gemini: AsyncMock,
+) -> None:
+    """--all with only llamacpp available uses AgentLoopRunner."""
+    mock_instance = MagicMock()
+    mock_instance.run = AsyncMock()
+    mock_agent_runner_cls.return_value = mock_instance
+
+    result = runner.invoke(app, ["bench", "--all"])
+    assert result.exit_code == 0, result.output
+    # 1 task x 3 modes x 1 driver (llamacpp) = 3 calls
+    assert mock_agent_runner_cls.call_count == 3
+    assert "3/3" in result.output
+    # Verify driver_name is llamacpp
+    for call in mock_agent_runner_cls.call_args_list:
+        assert call.kwargs["driver_name"] == "llamacpp"
 
 
 @patch("ctx_rm.benchmarks.runner.AgentLoopRunner")

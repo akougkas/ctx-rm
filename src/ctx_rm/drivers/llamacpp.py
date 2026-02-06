@@ -63,9 +63,12 @@ class LlamaCppDriver:
 
     async def check_available(self) -> bool:
         """Check if llama-server is reachable."""
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{self.base_url}/v1/models")
-            return resp.status_code == 200
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{self.base_url}/v1/models")
+                return resp.status_code == 200
+        except (httpx.ConnectError, httpx.TimeoutException):
+            return False
 
     async def chat(
         self,

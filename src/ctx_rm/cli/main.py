@@ -304,16 +304,21 @@ def _run_batch(
 ) -> None:
     """Batch mode: all tasks x 3 modes x available drivers."""
     from ctx_rm.benchmarks.loader import TaskLoader
-    from ctx_rm.benchmarks.runner import BenchmarkRunner
+    from ctx_rm.benchmarks.runner import AgentLoopRunner, BenchmarkRunner
     from ctx_rm.drivers.claude import ClaudeCodeDriver
     from ctx_rm.drivers.gemini import GeminiCLIDriver
+    from ctx_rm.drivers.llamacpp import LlamaCppDriver
 
     loader = TaskLoader(Path("docs/context_removal_benchmark_tasks.yaml"))
     task_ids = loader.list_task_ids()
 
     # Detect available drivers
     available_drivers: list[str] = []
-    for name, cls in [("gemini", GeminiCLIDriver), ("claude", ClaudeCodeDriver)]:
+    for name, cls in [
+        ("gemini", GeminiCLIDriver),
+        ("claude", ClaudeCodeDriver),
+        ("llamacpp", LlamaCppDriver),
+    ]:
         loop = asyncio.new_event_loop()
         try:
             if loop.run_until_complete(cls().check_available()):
@@ -324,7 +329,7 @@ def _run_batch(
     if not available_drivers:
         console.print(
             "\n  [bold red]No drivers available.[/bold red]"
-            "  Install gemini or claude CLI.\n"
+            "  Install gemini or claude CLI, or start llama-server.\n"
         )
         return
 
@@ -347,14 +352,24 @@ def _run_batch(
                 completed += 1
                 label = f"  [{completed}/{total}]  {tid}  {m}  {d}"
                 try:
-                    runner = BenchmarkRunner(
-                        driver_name=d,
-                        task_id=tid,
-                        mode=m,
-                        token_budget=budget,
-                        policy_name=policy.value,
-                        output_dir=output,
-                    )
+                    if d == "llamacpp":
+                        runner = AgentLoopRunner(
+                            driver_name=d,
+                            task_id=tid,
+                            mode=m,
+                            token_budget=budget,
+                            policy_name=policy.value,
+                            output_dir=output,
+                        )
+                    else:
+                        runner = BenchmarkRunner(
+                            driver_name=d,
+                            task_id=tid,
+                            mode=m,
+                            token_budget=budget,
+                            policy_name=policy.value,
+                            output_dir=output,
+                        )
                     asyncio.run(runner.run())
                     console.print(f"{label}  [green]done[/green]")
                 except Exception as e:
