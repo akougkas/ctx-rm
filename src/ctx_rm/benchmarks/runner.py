@@ -30,6 +30,7 @@ import structlog
 
 from ctx_rm.benchmarks.evaluator import Evaluator
 from ctx_rm.benchmarks.executor import TurnContent, TurnExecutor
+from ctx_rm.core.tokenizer import estimate_tokens
 from ctx_rm.benchmarks.fixtures import FixtureManager
 from ctx_rm.benchmarks.loader import TaskLoader
 from ctx_rm.config import CtxRmConfig
@@ -53,14 +54,6 @@ from ctx_rm.telemetry.metrics import MetricsCollector
 from ctx_rm.watch.watcher import Watcher, WatcherConfig
 
 logger = structlog.get_logger()
-
-# Rough token estimate: ~4 chars per token (conservative)
-CHARS_PER_TOKEN = 4
-
-
-def estimate_tokens(text: str) -> int:
-    """Quick token estimate without calling an API."""
-    return max(1, len(text) // CHARS_PER_TOKEN)
 
 
 class BenchmarkRunner:

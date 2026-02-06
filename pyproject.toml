@@ -56,7 +56,10 @@ embeddings = [
 ollama = [
     "ollama>=0.6",
 ]
-all = ["ctx-rm[gemini,bench,dev,embeddings,ollama]"]
+tokenizer = [
+    "tiktoken>=0.8",
+]
+all = ["ctx-rm[gemini,bench,dev,embeddings,ollama,tokenizer]"]
 
 [project.scripts]
 ctx-rm = "ctx_rm.cli.main:app"
