@@ -31,7 +31,7 @@ def _write_metrics(path: Path, tokens_in: int = 500, tokens_evicted: int = 100) 
 
 def _write_evaluation(path: Path, all_passed: bool = True, summary: str = "2/2 checks passed") -> None:
     data = {
-        "task_id": path.parent.parent.parent.name,
+        "task_id": "test",
         "all_passed": all_passed,
         "summary": summary,
         "checks": [],
@@ -135,36 +135,107 @@ def test_bench_rejects_invalid_mode(mock_runner_cls: MagicMock) -> None:
 # ── compare tests ────────────────────────────────────────────────────────────
 
 
-def test_compare_reads_nested_dirs(tmp_path: Path) -> None:
-    """compare walks results/{task}/{mode}/{driver}/ and shows data."""
-    leaf = tmp_path / "CR-001" / "ctx-rm" / "gemini"
-    _write_metrics(leaf / "metrics.json")
-    _write_evaluation(leaf / "evaluation.json", all_passed=True, summary="2/2 checks passed")
+def _invoke_compare(tmp_path: Path) -> object:
+    """Invoke compare with wide terminal to avoid Rich truncation."""
+    import os
+    old = os.environ.get("COLUMNS")
+    os.environ["COLUMNS"] = "200"
+    try:
+        return runner.invoke(app, ["compare", str(tmp_path)])
+    finally:
+        if old is None:
+            os.environ.pop("COLUMNS", None)
+        else:
+            os.environ["COLUMNS"] = old
 
-    result = runner.invoke(app, ["compare", str(tmp_path)])
+
+def test_compare_legacy_flat_structure(tmp_path: Path) -> None:
+    """compare reads legacy flat results/{task}/{mode}/{driver}/metrics.json."""
+    leaf = tmp_path / "CR-001" / "minimal" / "gemini"
+    _write_metrics(leaf / "metrics.json")
+    _write_evaluation(leaf / "evaluation.json", all_passed=True, summary="2/2")
+
+    result = _invoke_compare(tmp_path)
     assert result.exit_code == 0, result.output
     assert "CR-001" in result.output
-    assert "ctx-rm" in result.output
+    assert "minimal" in result.output
     assert "gemini" in result.output
-    assert "PASS" in result.output
+    # Legacy single run shows pass rate as 1/1
+    assert "1/1" in result.output
+    # Policy column shows "--" for non-ctx-rm
+    assert "--" in result.output
+
+
+def test_compare_multi_run_aggregation(tmp_path: Path) -> None:
+    """compare aggregates run-N directories using median."""
+    base = tmp_path / "CR-001" / "minimal" / "gemini"
+    # 3 runs with different metrics
+    _write_metrics(base / "run-1" / "metrics.json", tokens_in=100, tokens_evicted=10)
+    _write_evaluation(base / "run-1" / "evaluation.json", all_passed=True, summary="2/2")
+
+    _write_metrics(base / "run-2" / "metrics.json", tokens_in=200, tokens_evicted=20)
+    _write_evaluation(base / "run-2" / "evaluation.json", all_passed=False, summary="1/2")
+
+    _write_metrics(base / "run-3" / "metrics.json", tokens_in=300, tokens_evicted=30)
+    _write_evaluation(base / "run-3" / "evaluation.json", all_passed=True, summary="2/2")
+
+    result = _invoke_compare(tmp_path)
+    assert result.exit_code == 0, result.output
+    # Median of 100,200,300 = 200
+    assert "200" in result.output
+    # Pass rate: 2 passed out of 3
+    assert "2/3" in result.output
+    # Runs column: 3/3
+    assert "3/3" in result.output
+
+
+def test_compare_ctx_rm_policy_subdirs(tmp_path: Path) -> None:
+    """compare handles ctx-rm/{driver}/{policy}/run-N/ structure."""
+    base = tmp_path / "CR-001" / "ctx-rm" / "gemini" / "budget"
+    _write_metrics(base / "run-1" / "metrics.json", tokens_in=500, tokens_evicted=100)
+    _write_evaluation(base / "run-1" / "evaluation.json", all_passed=True, summary="2/2")
+
+    _write_metrics(base / "run-2" / "metrics.json", tokens_in=600, tokens_evicted=200)
+    _write_evaluation(base / "run-2" / "evaluation.json", all_passed=True, summary="2/2")
+
+    result = _invoke_compare(tmp_path)
+    assert result.exit_code == 0, result.output
+    assert "ctx-rm" in result.output
+    assert "budget" in result.output
+    assert "2/2" in result.output  # pass rate: both passed
+
+
+def test_compare_multiple_policies(tmp_path: Path) -> None:
+    """compare shows separate rows for different policies."""
+    for pol in ["lru", "arc"]:
+        base = tmp_path / "CR-001" / "ctx-rm" / "gemini" / pol
+        _write_metrics(base / "run-1" / "metrics.json", tokens_in=500)
+        _write_evaluation(base / "run-1" / "evaluation.json", all_passed=True, summary="2/2")
+
+    result = _invoke_compare(tmp_path)
+    assert result.exit_code == 0, result.output
+    assert "lru" in result.output
+    assert "arc" in result.output
 
 
 def test_compare_shows_mode_summary(tmp_path: Path) -> None:
     """compare prints mode-aggregated summary lines."""
     for task_id in ["CR-001", "CR-002"]:
         for mode_name in ["minimal", "ctx-rm"]:
-            leaf = tmp_path / task_id / mode_name / "gemini"
-            _write_metrics(leaf / "metrics.json")
+            if mode_name == "ctx-rm":
+                leaf = tmp_path / task_id / mode_name / "gemini" / "budget"
+            else:
+                leaf = tmp_path / task_id / mode_name / "gemini"
+            _write_metrics(leaf / "run-1" / "metrics.json")
             passed = mode_name == "ctx-rm"
             _write_evaluation(
-                leaf / "evaluation.json",
+                leaf / "run-1" / "evaluation.json",
                 all_passed=passed,
                 summary="2/2" if passed else "1/2",
             )
 
-    result = runner.invoke(app, ["compare", str(tmp_path)])
+    result = _invoke_compare(tmp_path)
     assert result.exit_code == 0, result.output
-    # ctx-rm: 2/2 passed, minimal: 0/2 passed
     assert "ctx-rm" in result.output
     assert "minimal" in result.output
 
@@ -172,19 +243,44 @@ def test_compare_shows_mode_summary(tmp_path: Path) -> None:
 def test_compare_handles_missing_evaluation(tmp_path: Path) -> None:
     """compare does not crash when evaluation.json is missing; shows --."""
     leaf = tmp_path / "CR-001" / "full" / "gemini"
-    _write_metrics(leaf / "metrics.json")
+    _write_metrics(leaf / "run-1" / "metrics.json")
     # No evaluation.json written
 
-    result = runner.invoke(app, ["compare", str(tmp_path)])
+    result = _invoke_compare(tmp_path)
     assert result.exit_code == 0, result.output
     assert "CR-001" in result.output
     assert "--" in result.output
+
+
+def test_compare_handles_partial_runs(tmp_path: Path) -> None:
+    """compare handles run dirs where some have metrics but no evaluation."""
+    base = tmp_path / "CR-001" / "minimal" / "gemini"
+    _write_metrics(base / "run-1" / "metrics.json", tokens_in=100)
+    _write_evaluation(base / "run-1" / "evaluation.json", all_passed=True, summary="2/2")
+
+    _write_metrics(base / "run-2" / "metrics.json", tokens_in=200)
+    # run-2 has no evaluation.json — partial data
+
+    _write_metrics(base / "run-3" / "metrics.json", tokens_in=300)
+    _write_evaluation(base / "run-3" / "evaluation.json", all_passed=False, summary="1/2")
+
+    result = _invoke_compare(tmp_path)
+    assert result.exit_code == 0, result.output
+    # Pass rate based on evals only: 1 passed out of 2 evaluated
+    assert "1/2" in result.output
 
 
 def test_compare_missing_dir(tmp_path: Path) -> None:
     """compare exits with error for nonexistent directory."""
     result = runner.invoke(app, ["compare", str(tmp_path / "nonexistent")])
     assert result.exit_code == 1
+
+
+def test_compare_empty_results(tmp_path: Path) -> None:
+    """compare with no results shows 'No results found'."""
+    result = runner.invoke(app, ["compare", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "No results found" in result.output
 
 
 # ── tasks tests ──────────────────────────────────────────────────────────────

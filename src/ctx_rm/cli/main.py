@@ -357,6 +357,160 @@ def _run_batch(
 # ── compare ──────────────────────────────────────────────────────────────────
 
 
+_KNOWN_POLICIES = frozenset(p.value for p in Policy)
+
+
+def _collect_runs(run_parent: Path) -> list[Path]:
+    """Return sorted list of run-N directories under *run_parent*."""
+    return sorted(
+        (d for d in run_parent.iterdir() if d.is_dir() and d.name.startswith("run-")),
+        key=lambda p: p.name,
+    )
+
+
+def _aggregate_runs(
+    run_dirs: list[Path],
+) -> tuple[float, float, float, int, int, str, str | None]:
+    """Aggregate metrics across run-N directories.
+
+    Returns:
+        (median_tokens_in, median_evicted, median_peak,
+         passes, total_eval_runs, best_checks_str, pass_rate_str)
+    """
+    import orjson
+    from statistics import median
+
+    tokens_in_list: list[float] = []
+    evicted_list: list[float] = []
+    peak_list: list[float] = []
+    passes = 0
+    total_eval = 0
+    checks_str = "--"
+
+    for rd in run_dirs:
+        mp = rd / "metrics.json"
+        if not mp.exists():
+            continue
+        data = orjson.loads(mp.read_bytes())
+        s = data.get("summary", {})
+        tokens_in_list.append(s.get("total_ingested_tokens", 0))
+        evicted_list.append(s.get("total_evicted_tokens", 0))
+        peak_list.append(s.get("peak_utilization", 0))
+
+        ep = rd / "evaluation.json"
+        if ep.exists():
+            ev = orjson.loads(ep.read_bytes())
+            total_eval += 1
+            if ev.get("all_passed", False):
+                passes += 1
+            cs = ev.get("summary", "--")
+            if cs != "--":
+                checks_str = cs
+
+    if not tokens_in_list:
+        return 0, 0, 0, 0, 0, "--", None
+
+    med_in = median(tokens_in_list)
+    med_ev = median(evicted_list)
+    med_pk = median(peak_list)
+    pass_rate = f"{passes}/{total_eval}" if total_eval > 0 else None
+
+    return med_in, med_ev, med_pk, passes, total_eval, checks_str, pass_rate
+
+
+def _read_single(
+    driver_dir: Path,
+) -> tuple[float, float, float, int, int, str, str | None] | None:
+    """Read legacy single-run result (metrics.json directly in driver_dir)."""
+    import orjson
+
+    mp = driver_dir / "metrics.json"
+    if not mp.exists():
+        return None
+    data = orjson.loads(mp.read_bytes())
+    s = data.get("summary", {})
+    tokens_in = s.get("total_ingested_tokens", 0)
+    evicted = s.get("total_evicted_tokens", 0)
+    peak = s.get("peak_utilization", 0)
+    passes = 0
+    total_eval = 0
+    checks_str = "--"
+    pass_rate: str | None = None
+
+    ep = driver_dir / "evaluation.json"
+    if ep.exists():
+        ev = orjson.loads(ep.read_bytes())
+        total_eval = 1
+        if ev.get("all_passed", False):
+            passes = 1
+        checks_str = ev.get("summary", "--")
+        pass_rate = f"{passes}/1"
+
+    return float(tokens_in), float(evicted), float(peak), passes, total_eval, checks_str, pass_rate
+
+
+def _format_row(
+    table: Table,
+    task_name: str,
+    mode_name: str,
+    driver_name: str,
+    policy_name: str,
+    med_in: float,
+    med_ev: float,
+    med_pk: float,
+    checks_str: str,
+    pass_rate: str | None,
+    num_runs: int,
+    total_runs: int,
+) -> None:
+    """Add a formatted row to the compare table."""
+    # Color eviction column
+    evict_style = ""
+    if mode_name == "ctx-rm" and med_ev > 0:
+        evict_style = "cyan"
+    evict_display = (
+        f"[{evict_style}]{int(med_ev):,}[/{evict_style}]"
+        if evict_style
+        else f"{int(med_ev):,}"
+    )
+
+    # Color peak utilization
+    if med_pk > 0.9:
+        peak_display = f"[red]{med_pk:.0%}[/red]"
+    elif med_pk > 0.7:
+        peak_display = f"[yellow]{med_pk:.0%}[/yellow]"
+    else:
+        peak_display = f"{med_pk:.0%}"
+
+    # Pass rate display
+    if pass_rate is None:
+        rate_display = "[dim]--[/dim]"
+    else:
+        parts = pass_rate.split("/")
+        p, t = int(parts[0]), int(parts[1])
+        if p == t:
+            rate_display = f"[bold green]{pass_rate}[/bold green]"
+        elif p > 0:
+            rate_display = f"[yellow]{pass_rate}[/yellow]"
+        else:
+            rate_display = f"[bold red]{pass_rate}[/bold red]"
+
+    runs_display = f"{num_runs}/{total_runs}" if total_runs > 1 else "1"
+
+    table.add_row(
+        task_name,
+        mode_name,
+        driver_name,
+        policy_name,
+        f"{int(med_in):,}",
+        evict_display,
+        peak_display,
+        checks_str,
+        rate_display,
+        runs_display,
+    )
+
+
 @app.command()
 def compare(
     results_dir: Annotated[Path, typer.Argument(
@@ -367,9 +521,10 @@ def compare(
 
     Reads nested results/{task}/{mode}/{driver}/ directories and generates
     a summary table with token usage, eviction stats, and pass/fail status.
+    Supports multi-run (run-N) directories with median aggregation and
+    ctx-rm policy subdirectories.
     """
     _quiet_logs()
-    import orjson
 
     if not results_dir.is_dir():
         console.print(f"\n  [red]Not found:[/red] {results_dir}\n")
@@ -385,11 +540,13 @@ def compare(
     table.add_column("Task", style="bold")
     table.add_column("Mode")
     table.add_column("Driver")
+    table.add_column("Policy")
     table.add_column("Tokens In", justify="right", style="dim")
     table.add_column("Evicted", justify="right")
     table.add_column("Peak %", justify="right")
     table.add_column("Checks", justify="right")
-    table.add_column("Result", justify="center")
+    table.add_column("Pass Rate", justify="center")
+    table.add_column("Runs", justify="right", style="dim")
 
     mode_stats: dict[str, dict[str, int]] = {}
     row_count = 0
@@ -400,72 +557,78 @@ def compare(
         for mode_dir in sorted(task_dir.iterdir()):
             if not mode_dir.is_dir():
                 continue
+            mode_name = mode_dir.name
+
             for driver_dir in sorted(mode_dir.iterdir()):
                 if not driver_dir.is_dir():
                     continue
 
-                metrics_path = driver_dir / "metrics.json"
-                eval_path = driver_dir / "evaluation.json"
+                # Detect structure: policy subdirs (ctx-rm), run-N dirs, or legacy flat
+                subdirs = [d for d in driver_dir.iterdir() if d.is_dir()]
+                subdir_names = {d.name for d in subdirs}
 
-                if not metrics_path.exists():
-                    continue
+                # Check for policy subdirectories (ctx-rm mode)
+                has_policy_dirs = bool(subdir_names & _KNOWN_POLICIES)
 
-                metrics_data = orjson.loads(metrics_path.read_bytes())
-                s = metrics_data.get("summary", {})
+                if has_policy_dirs:
+                    # ctx-rm with policy subdirs: driver/{policy}/run-N/
+                    for policy_dir in sorted(subdirs):
+                        if policy_dir.name not in _KNOWN_POLICIES:
+                            continue
+                        run_dirs = _collect_runs(policy_dir)
+                        if not run_dirs:
+                            # Legacy: policy dir contains metrics.json directly
+                            result = _read_single(policy_dir)
+                            if result is None:
+                                continue
+                            med_in, med_ev, med_pk, passes, total_eval, checks_str, pass_rate = result
+                            num_runs, total_runs = 1, 1
+                        else:
+                            med_in, med_ev, med_pk, passes, total_eval, checks_str, pass_rate = _aggregate_runs(run_dirs)
+                            if med_in == 0 and med_ev == 0 and med_pk == 0 and total_eval == 0:
+                                continue
+                            num_runs, total_runs = len(run_dirs), len(run_dirs)
 
-                tokens_in = s.get("total_ingested_tokens", 0)
-                tokens_evicted = s.get("total_evicted_tokens", 0)
-                peak_util = s.get("peak_utilization", 0)
+                        _format_row(
+                            table, task_dir.name, mode_name, driver_dir.name,
+                            policy_dir.name, med_in, med_ev, med_pk, checks_str,
+                            pass_rate, num_runs, total_runs,
+                        )
+                        row_count += 1
 
-                checks_str = "--"
-                result_str = "[dim]--[/dim]"
-                all_passed = None
+                        if mode_name not in mode_stats:
+                            mode_stats[mode_name] = {"passed": 0, "total": 0}
+                        mode_stats[mode_name]["total"] += total_eval
+                        mode_stats[mode_name]["passed"] += passes
 
-                if eval_path.exists():
-                    eval_data = orjson.loads(eval_path.read_bytes())
-                    checks_str = eval_data.get("summary", "--")
-                    all_passed = eval_data.get("all_passed", False)
-                    if all_passed:
-                        result_str = "[bold green]PASS[/bold green]"
+                else:
+                    # Non-policy path: check for run-N dirs or legacy flat
+                    run_dirs = _collect_runs(driver_dir)
+                    policy_display = "--"
+
+                    if run_dirs:
+                        med_in, med_ev, med_pk, passes, total_eval, checks_str, pass_rate = _aggregate_runs(run_dirs)
+                        if med_in == 0 and med_ev == 0 and med_pk == 0 and total_eval == 0:
+                            continue
+                        num_runs, total_runs = len(run_dirs), len(run_dirs)
                     else:
-                        result_str = "[bold red]FAIL[/bold red]"
+                        result = _read_single(driver_dir)
+                        if result is None:
+                            continue
+                        med_in, med_ev, med_pk, passes, total_eval, checks_str, pass_rate = result
+                        num_runs, total_runs = 1, 1
 
-                # Color eviction column based on mode
-                evict_style = ""
-                mode_name = mode_dir.name
-                if mode_name == "ctx-rm" and tokens_evicted > 0:
-                    evict_style = "cyan"
+                    _format_row(
+                        table, task_dir.name, mode_name, driver_dir.name,
+                        policy_display, med_in, med_ev, med_pk, checks_str,
+                        pass_rate, num_runs, total_runs,
+                    )
+                    row_count += 1
 
-                if evict_style:
-                    evict_display = f"[{evict_style}]{tokens_evicted:,}[/{evict_style}]"
-                else:
-                    evict_display = f"{tokens_evicted:,}"
-
-                # Color peak util
-                if peak_util > 0.9:
-                    peak_display = f"[red]{peak_util:.0%}[/red]"
-                elif peak_util > 0.7:
-                    peak_display = f"[yellow]{peak_util:.0%}[/yellow]"
-                else:
-                    peak_display = f"{peak_util:.0%}"
-
-                table.add_row(
-                    task_dir.name,
-                    mode_name,
-                    driver_dir.name,
-                    f"{tokens_in:,}",
-                    evict_display,
-                    peak_display,
-                    checks_str,
-                    result_str,
-                )
-                row_count += 1
-
-                if mode_name not in mode_stats:
-                    mode_stats[mode_name] = {"passed": 0, "total": 0}
-                mode_stats[mode_name]["total"] += 1
-                if all_passed is True:
-                    mode_stats[mode_name]["passed"] += 1
+                    if mode_name not in mode_stats:
+                        mode_stats[mode_name] = {"passed": 0, "total": 0}
+                    mode_stats[mode_name]["total"] += total_eval
+                    mode_stats[mode_name]["passed"] += passes
 
     if row_count == 0:
         console.print(f"\n  [dim]No results found in {results_dir}[/dim]\n")
@@ -478,8 +641,8 @@ def compare(
     if mode_stats:
         console.print()
         summary = Text("  ")
-        for mode_name in sorted(mode_stats):
-            stats = mode_stats[mode_name]
+        for mn in sorted(mode_stats):
+            stats = mode_stats[mn]
             pct = (stats["passed"] / stats["total"] * 100) if stats["total"] > 0 else 0
             if pct == 100:
                 style = "bold green"
@@ -487,7 +650,7 @@ def compare(
                 style = "yellow"
             else:
                 style = "dim"
-            summary.append(f"{mode_name}: ", style="bold")
+            summary.append(f"{mn}: ", style="bold")
             summary.append(f"{stats['passed']}/{stats['total']} ", style=style)
             summary.append("  ", style="dim")
         console.print(summary)
