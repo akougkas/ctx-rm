@@ -34,7 +34,7 @@ from ctx_rm.benchmarks.fixtures import FixtureManager
 from ctx_rm.benchmarks.loader import TaskLoader
 from ctx_rm.core.bus import ContextBus
 from ctx_rm.core.graveyard import TieredStore
-from ctx_rm.core.policies import ARCPolicy, BudgetAwarePolicy, ClockPolicy, EvictionPolicy, LRUPolicy
+from ctx_rm.core.policies import ARCPolicy, BudgetAwarePolicy, ClockPolicy, EvictionPolicy, InnoDBPolicy, LRUPolicy
 from ctx_rm.core.scorer import HeuristicScorer
 from ctx_rm.core.segment import Segment, SegmentRole
 from ctx_rm.drivers.base import AgentDriver
@@ -330,6 +330,8 @@ class BenchmarkRunner:
             return BudgetAwarePolicy()
         elif self.policy_name == "arc":
             return ARCPolicy(capacity_tokens=self.token_budget)
+        elif self.policy_name == "innodb":
+            return InnoDBPolicy(capacity_tokens=self.token_budget)
         else:
             raise ValueError(f"Unknown policy: {self.policy_name}")
 

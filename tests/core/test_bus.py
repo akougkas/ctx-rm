@@ -103,3 +103,55 @@ def test_stats():
     assert stats["active_segments"] == 1
     assert stats["active_tokens"] == 100
     assert stats["budget"] == 1000
+
+
+# ── Admission Control ────────────────────────────────────────────────────
+
+
+def test_admission_large_file_read_bypasses_active():
+    """Large file_read segments go directly to Warm, not Active."""
+    store = TieredStore()
+    bus = ContextBus(
+        token_budget=10000, store=store, policy=LRUPolicy(), admission_threshold=500
+    )
+
+    seg = _make_seg(content="big file", tokens=1000)
+    seg.source = "file_read:src/huge.py"
+    bus.ingest(seg)
+
+    assert seg.seg_id not in {s.seg_id for s in bus.active_segments}
+    assert seg.tier == Tier.WARM
+    assert bus.active_tokens == 0
+    assert store.warm.count > 0
+
+
+def test_admission_small_file_read_enters_active():
+    """Small file_read segments below threshold enter Active normally."""
+    store = TieredStore()
+    bus = ContextBus(
+        token_budget=10000, store=store, policy=LRUPolicy(), admission_threshold=500
+    )
+
+    seg = _make_seg(content="small file", tokens=200)
+    seg.source = "file_read:src/tiny.py"
+    bus.ingest(seg)
+
+    assert seg.seg_id in {s.seg_id for s in bus.active_segments}
+    assert seg.tier == Tier.ACTIVE
+    assert bus.active_tokens == 200
+
+
+def test_admission_user_message_not_affected():
+    """User messages are never subject to admission control regardless of size."""
+    store = TieredStore()
+    bus = ContextBus(
+        token_budget=10000, store=store, policy=LRUPolicy(), admission_threshold=500
+    )
+
+    seg = _make_seg(content="large user prompt", tokens=3000)
+    seg.source = "user_message"
+    bus.ingest(seg)
+
+    assert seg.seg_id in {s.seg_id for s in bus.active_segments}
+    assert seg.tier == Tier.ACTIVE
+    assert bus.active_tokens == 3000

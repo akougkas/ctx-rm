@@ -40,7 +40,7 @@ def info() -> None:
 
     table.add_row("Gemini CLI", "✓ available" if drivers["gemini"] else "✗ not found")
     table.add_row("Claude Code", "✓ available" if drivers["claude"] else "✗ not found")
-    table.add_row("Policies", "LRU, CLOCK, BudgetAware, ARC")
+    table.add_row("Policies", "LRU, CLOCK, BudgetAware, ARC, InnoDB")
     table.add_row("Scorers", "Heuristic (built-in)")
     table.add_row("Store", "SQLite (built-in)")
 
@@ -54,7 +54,7 @@ def bench(
     mode: Annotated[str, typer.Option(help="Session mode: 'minimal', 'ctx-rm', 'full'")] = "ctx-rm",
     budget: Annotated[int, typer.Option(help="Token budget for active context")] = 100_000,
     policy: Annotated[
-        str, typer.Option(help="Eviction policy: 'lru', 'clock', 'budget', 'arc'")
+        str, typer.Option(help="Eviction policy: 'lru', 'clock', 'budget', 'arc', 'innodb'")
     ] = "budget",
     output: Annotated[Path, typer.Option(help="Output directory for metrics")] = Path("./results"),
     all_tasks: Annotated[bool, typer.Option("--all", help="Run all tasks x modes x available drivers")] = False,

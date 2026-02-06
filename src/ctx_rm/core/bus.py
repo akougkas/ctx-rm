@@ -43,6 +43,7 @@ class ContextBus:
         scorer: Scorer | None = None,
         metrics: MetricsCollector | None = None,
         headroom_ratio: float = 0.15,  # Keep 15% headroom by default
+        admission_threshold: int = 2000,
     ) -> None:
         self.token_budget = token_budget
         self.headroom_ratio = headroom_ratio
@@ -50,6 +51,7 @@ class ContextBus:
         self.policy = policy
         self.scorer = scorer
         self.metrics = metrics
+        self.admission_threshold = admission_threshold
 
         # Active context — ordered by insertion (used for rendering to LLM)
         self._active: OrderedDict[str, Segment] = OrderedDict()
@@ -93,8 +95,27 @@ class ContextBus:
 
         This is the "bombard" path — the agent ingests freely. If the active
         context exceeds the budget, eviction is triggered automatically.
+
+        Admission control: segments with source 'file_read' or 'tool' whose
+        token_count exceeds admission_threshold are routed directly to Warm
+        instead of Active, preventing scan pollution.
         """
         segment.turn_number = self._turn
+
+        # Admission control: route large file_read/tool segments to Warm
+        if self._should_bypass_active(segment):
+            segment.tier = Tier.WARM
+            self.store.demote_to_warm(segment)
+            logger.debug(
+                "segment_admitted_to_warm",
+                seg_id=segment.seg_id,
+                tokens=segment.token_count,
+                source=segment.source,
+            )
+            if self.metrics:
+                self.metrics.record_ingest(segment)
+            return
+
         segment.tier = Tier.ACTIVE
         self._active[segment.seg_id] = segment
         self._active_tokens += segment.token_count
@@ -219,6 +240,24 @@ class ContextBus:
         }
 
     # ── Internal ────────────────────────────────────────────────────────
+
+    # Sources that trigger admission control bypass
+    _ADMISSION_SOURCES = frozenset({"file_read", "tool"})
+
+    def _should_bypass_active(self, segment: Segment) -> bool:
+        """Check if a segment should bypass Active and go directly to Warm.
+
+        Large segments from file_read or tool sources are routed to Warm to
+        prevent scan pollution in the active context.
+        """
+        if segment.source is None:
+            return False
+        # Match source prefix (e.g., "file_read:src/auth.py" or "tool:bash")
+        source_prefix = segment.source.split(":")[0] if ":" in segment.source else segment.source
+        return (
+            source_prefix in self._ADMISSION_SOURCES
+            and segment.token_count > self.admission_threshold
+        )
 
     def _evict_segment(self, seg: Segment) -> None:
         """Remove a segment from active and push to tiered store."""

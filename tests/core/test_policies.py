@@ -5,6 +5,7 @@ import time
 from ctx_rm.core.policies.arc import ARCPolicy
 from ctx_rm.core.policies.budget import BudgetAwarePolicy
 from ctx_rm.core.policies.clock import ClockPolicy
+from ctx_rm.core.policies.innodb import InnoDBPolicy
 from ctx_rm.core.policies.lru import LRUPolicy
 from ctx_rm.core.segment import Segment, SegmentRole
 
@@ -213,3 +214,90 @@ def test_arc_ghost_list_bounded():
     # B1 total tokens should not exceed capacity (500)
     b1_total = sum(policy._b1.values())
     assert b1_total <= 500
+
+
+# ── InnoDB ─────────────────────────────────────────────────────────────
+
+
+def test_innodb_ingest_adds_to_old():
+    """New segments always enter the old sublist."""
+    policy = InnoDBPolicy(capacity_tokens=10000)
+    seg = _make_seg("new_content", tokens=100)
+
+    policy.on_ingest(seg)
+
+    assert seg.seg_id in policy._old
+    assert seg.seg_id not in policy._new
+
+
+def test_innodb_access_promotes_old_to_new():
+    """Re-access (second touch) promotes a segment from old to new sublist."""
+    policy = InnoDBPolicy(capacity_tokens=10000)
+    seg = _make_seg("promote_me", tokens=150)
+
+    policy.on_ingest(seg)
+    assert seg.seg_id in policy._old
+
+    policy.on_access(seg)
+    assert seg.seg_id not in policy._old
+    assert seg.seg_id in policy._new
+
+
+def test_innodb_access_refreshes_new_position():
+    """Accessing a segment already in new sublist refreshes its position."""
+    policy = InnoDBPolicy(capacity_tokens=10000)
+    seg_a = _make_seg("a", tokens=100)
+    seg_b = _make_seg("b", tokens=100)
+
+    # Both enter old, both promote to new
+    policy.on_ingest(seg_a)
+    policy.on_ingest(seg_b)
+    policy.on_access(seg_a)
+    policy.on_access(seg_b)
+
+    # Order in new: [a, b] (a is oldest)
+    assert list(policy._new.keys()) == [seg_a.seg_id, seg_b.seg_id]
+
+    # Re-access a -> moves to end
+    policy.on_access(seg_a)
+    assert list(policy._new.keys()) == [seg_b.seg_id, seg_a.seg_id]
+
+
+def test_innodb_eviction_prefers_old_sublist():
+    """select_evictions returns old sublist candidates before new sublist."""
+    policy = InnoDBPolicy(capacity_tokens=10000)
+    old_seg = _make_seg("old_resident", tokens=100)
+    new_seg = _make_seg("new_resident", tokens=100)
+
+    policy.on_ingest(old_seg)   # -> old
+    policy.on_ingest(new_seg)   # -> old
+    policy.on_access(new_seg)   # promote to new
+
+    evicted = policy.select_evictions([old_seg, new_seg], tokens_to_free=100)
+    assert len(evicted) == 1
+    assert evicted[0].seg_id == old_seg.seg_id
+
+
+def test_innodb_on_evict_removes_from_sublist():
+    """on_evict removes the segment from its sublist and updates token counters."""
+    policy = InnoDBPolicy(capacity_tokens=10000)
+    seg = _make_seg("evict_me", tokens=200)
+
+    policy.on_ingest(seg)
+    assert policy._old_tokens == 200
+
+    policy.on_evict(seg)
+    assert seg.seg_id not in policy._old
+    assert policy._old_tokens == 0
+
+
+def test_innodb_duplicate_ingest_ignored():
+    """Re-ingesting an already-tracked segment is a no-op."""
+    policy = InnoDBPolicy(capacity_tokens=10000)
+    seg = _make_seg("dup", tokens=100)
+
+    policy.on_ingest(seg)
+    policy.on_ingest(seg)  # should be ignored
+
+    assert policy._old_tokens == 100
+    assert list(policy._old.values()).count(100) == 1
