@@ -99,6 +99,9 @@ class ContextBus:
         self._active[segment.seg_id] = segment
         self._active_tokens += segment.token_count
 
+        # Notify policy of ingest (ghost hit detection for ARC, no-op for others)
+        self.policy.on_ingest(segment)
+
         if self.metrics:
             self.metrics.record_ingest(segment)
 
@@ -165,11 +168,29 @@ class ContextBus:
         self._active[segment.seg_id] = segment
         self._active_tokens += segment.token_count
 
+        # Notify policy of access (T1->T2 promotion for ARC, no-op for others)
+        self.policy.on_access(segment)
+
         if self.metrics:
             self.metrics.record_recall(segment)
 
         logger.info("segment_recalled", seg_id=seg_id, tier_from=segment.tier.value)
         return segment
+
+    def touch_segment(self, seg_id: str) -> bool:
+        """Touch an active segment to record access.
+
+        Notifies the policy so stateful policies (e.g., ARC) can track
+        recency/frequency transitions.
+
+        Returns True if the segment was found and touched.
+        """
+        seg = self._active.get(seg_id)
+        if seg is None:
+            return False
+        seg.touch()
+        self.policy.on_access(seg)
+        return True
 
     def search_graveyard(self, query: str, top_k: int = 5) -> list[Segment]:
         """Search evicted segments by content similarity."""
@@ -201,6 +222,9 @@ class ContextBus:
 
     def _evict_segment(self, seg: Segment) -> None:
         """Remove a segment from active and push to tiered store."""
+        # Notify policy of eviction (ghost list update for ARC, no-op for others)
+        self.policy.on_evict(seg)
+
         if seg.seg_id in self._active:
             del self._active[seg.seg_id]
             self._active_tokens -= seg.token_count
