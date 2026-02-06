@@ -47,6 +47,20 @@ class EvictionPolicy(ABC):
             freed += seg.token_count
         return selected
 
+    # ── Lifecycle hooks (optional, default no-ops) ─────────────────────
+
+    def on_ingest(self, seg: Segment) -> None:
+        """Called when a segment is ingested into active context."""
+        pass
+
+    def on_access(self, seg: Segment) -> None:
+        """Called when a segment is recalled/accessed."""
+        pass
+
+    def on_evict(self, seg: Segment) -> None:
+        """Called when a segment is evicted from active context."""
+        pass
+
     def _reason(self, seg: Segment) -> str:
         """Default eviction reason — subclasses can override."""
         return f"policy:{self.name}"
