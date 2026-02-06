@@ -352,14 +352,64 @@ def _make_eviction_task(fixture_dir: Path) -> Task:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_eviction_pressure_ctx_rm(driver, tmp_path) -> None:
-    """Tight budget + heavy noise → eviction MUST fire.
+async def test_eviction_pressure_ctx_rm_budget_policy(driver, tmp_path) -> None:
+    """BudgetAwarePolicy + source-aware scorer → needle survives eviction.
 
-    Honestly reports: did needle survive? did eval pass?
-    Does NOT assert eval passes — HeuristicScorer is blind to content,
-    so needle may be evicted alongside noise. This is expected and proves
-    we need source-aware scoring.
+    This is the core ctx-rm hypothesis test:
+    - Tight budget forces eviction
+    - Source-aware scorer scores needles > noise
+    - BudgetAwarePolicy evicts lowest score first → noise dies, needle lives
     """
+    import orjson
+
+    fixture_dir = tmp_path / "fixture"
+    fixture_dir.mkdir()
+    result_dir = tmp_path / "results"
+
+    task = _make_eviction_task(fixture_dir)
+    runner = AgentLoopRunner(
+        driver_name="llamacpp",
+        task_id="EVICT-001",
+        mode="ctx-rm",
+        token_budget=1500,
+        policy_name="budget",
+        output_dir=result_dir,
+        max_turns=10,
+    )
+
+    result = await runner.run_with_task(task=task, working_copy=fixture_dir)
+
+    assert result.segments_evicted > 0, (
+        "Budget 1500 with 2000 noise tokens must trigger eviction"
+    )
+
+    bus = runner._last_bus
+    needle_alive = any("needle" in s.source for s in bus.active_segments)
+    noise_alive = any("noise" in s.source for s in bus.active_segments)
+
+    eval_path = result_dir / "EVICT-001" / "ctx-rm" / "llamacpp" / "budget" / "run-1" / "evaluation.json"
+    eval_data = orjson.loads(eval_path.read_bytes())
+
+    print("\n" + "=" * 60)
+    print("CTX-RM: BudgetAwarePolicy + source-aware scorer")
+    print("=" * 60)
+    print(f"  Budget:            1500 tokens")
+    print(f"  Segments evicted:  {result.segments_evicted}")
+    print(f"  Turns:             {result.turns}")
+    print(f"  Tool calls:        {result.tool_calls_made}")
+    print(f"  Needle survived:   {needle_alive}")
+    print(f"  Noise survived:    {noise_alive}")
+    print(f"  Eval passed:       {eval_data['all_passed']}")
+    print(f"  Active tokens:     {bus.active_tokens}/{bus.token_budget}")
+    print("=" * 60)
+
+    assert needle_alive, "BudgetAwarePolicy + source scorer must preserve needle"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_eviction_pressure_ctx_rm_lru_policy(driver, tmp_path) -> None:
+    """LRU policy ignores scores → needle evicted first (contrast with budget)."""
     import orjson
 
     fixture_dir = tmp_path / "fixture"
@@ -379,34 +429,21 @@ async def test_eviction_pressure_ctx_rm(driver, tmp_path) -> None:
 
     result = await runner.run_with_task(task=task, working_copy=fixture_dir)
 
-    # Hard assertion: eviction MUST happen with this budget
-    assert result.segments_evicted > 0, (
-        "Budget 1500 with 2000 noise tokens must trigger eviction"
-    )
+    assert result.segments_evicted > 0
 
-    # Check needle survival in bus
     bus = runner._last_bus
     needle_alive = any("needle" in s.source for s in bus.active_segments)
-    noise_alive = any("noise" in s.source for s in bus.active_segments)
 
-    # Check eval outcome
     eval_path = result_dir / "EVICT-001" / "ctx-rm" / "llamacpp" / "lru" / "run-1" / "evaluation.json"
     eval_data = orjson.loads(eval_path.read_bytes())
 
     print("\n" + "=" * 60)
-    print("EVICTION PRESSURE TEST — CTX-RM MODE (LRU + HeuristicScorer)")
+    print("CTX-RM: LRU policy (ignores scores — contrast)")
     print("=" * 60)
-    print(f"  Budget:            1500 tokens")
     print(f"  Segments evicted:  {result.segments_evicted}")
-    print(f"  Turns:             {result.turns}")
-    print(f"  Tool calls:        {result.tool_calls_made}")
     print(f"  Needle survived:   {needle_alive}")
-    print(f"  Noise survived:    {noise_alive}")
     print(f"  Eval passed:       {eval_data['all_passed']}")
-    print(f"  Active tokens:     {bus.active_tokens}/{bus.token_budget}")
-    if not needle_alive:
-        print("  >> NEEDLE EVICTED — proves HeuristicScorer is blind to content")
-        print("  >> Need source-aware scoring to fix this")
+    print(f"  >> LRU evicts oldest first regardless of score")
     print("=" * 60)
 
 

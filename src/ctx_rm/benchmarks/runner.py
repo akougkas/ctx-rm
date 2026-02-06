@@ -697,4 +697,7 @@ class AgentLoopRunner:
                 max_concurrent=config.ollama_max_concurrent,
                 task_goal=self.task_id,
             )
+        # Source-aware scoring for ctx-rm mode: needles score higher than noise
+        if self.mode == "ctx-rm":
+            return HeuristicScorer(source_weight=0.3)
         return HeuristicScorer()

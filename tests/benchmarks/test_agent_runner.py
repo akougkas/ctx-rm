@@ -407,3 +407,65 @@ class TestAgentLoopRunner:
         assert result.segments_evicted > 0, (
             "Tight budget (500) with 2000 tokens of noise must trigger eviction"
         )
+
+    @pytest.mark.asyncio
+    async def test_budget_policy_with_source_scorer_preserves_needle(self, tmp_path: Path) -> None:
+        """BudgetAwarePolicy + source_weight > 0 → needle survives, noise dies."""
+        from ctx_rm.benchmarks.runner import AgentLoopRunner
+
+        fixture_dir = tmp_path / "fixture"
+        fixture_dir.mkdir()
+
+        task = Task(
+            id="NEEDLE-001",
+            title="needle_retention_test",
+            expected_winner="ctx-rm",
+            eviction_pressure="heavy",
+            min_turns=3,
+            repo_fixture=str(fixture_dir),
+            scenario="Write 'hello' to output.txt.",
+            needles=[
+                Needle(
+                    id="N1",
+                    type="fact",
+                    injection_turn=1,
+                    injection_method="doc_read",
+                    content="The file must contain 'hello'.",
+                    risk_if_evicted="Agent writes wrong content.",
+                ),
+            ],
+            context_injections=[
+                ContextInjection(
+                    turn=1, type="noise", size_tokens=2000,
+                    description="Heavy noise",
+                ),
+            ],
+            success_criteria=["output.txt contains hello"],
+            evaluation=[
+                FileContainsCheck(
+                    check="file_contains",
+                    target="output.txt",
+                    must_include="hello",
+                ),
+            ],
+        )
+
+        runner = AgentLoopRunner(
+            driver_name="llamacpp",
+            task_id="NEEDLE-001",
+            mode="ctx-rm",
+            token_budget=500,
+            policy_name="budget",
+            output_dir=tmp_path / "results",
+        )
+
+        result = await runner.run_with_task(
+            task=task,
+            working_copy=fixture_dir,
+            driver_factory=lambda: FakeChatDriver(fixture_dir),
+        )
+
+        assert result.segments_evicted > 0
+        bus = runner._last_bus
+        needle_alive = any("needle" in s.source for s in bus.active_segments)
+        assert needle_alive, "BudgetAwarePolicy + source scorer must preserve needle"
