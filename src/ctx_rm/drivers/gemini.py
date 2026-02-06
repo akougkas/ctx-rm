@@ -16,6 +16,7 @@ Ref: https://github.com/google-gemini/gemini-cli
 from __future__ import annotations
 
 import asyncio
+import random
 import shutil
 
 import orjson
@@ -24,6 +25,9 @@ import structlog
 from ctx_rm.drivers.base import AgentDriver, AgentResponse
 
 logger = structlog.get_logger()
+
+# Patterns in stderr/error output that indicate transient rate-limit errors
+_RETRYABLE_PATTERNS = ("429", "RESOURCE_EXHAUSTED", "rate")
 
 
 class GeminiCLIDriver(AgentDriver):
@@ -34,10 +38,12 @@ class GeminiCLIDriver(AgentDriver):
         model: str = "gemini-2.5-pro",
         yolo: bool = True,
         extra_args: list[str] | None = None,
+        max_retries: int = 3,
     ) -> None:
         self.model = model
         self.yolo = yolo
         self.extra_args = extra_args or []
+        self.max_retries = max_retries
 
     @property
     def name(self) -> str:
@@ -50,7 +56,11 @@ class GeminiCLIDriver(AgentDriver):
         working_dir: str | None = None,
         timeout: int = 300,
     ) -> AgentResponse:
-        """Invoke Gemini CLI with a prompt and optional context."""
+        """Invoke Gemini CLI with a prompt and optional context.
+
+        Transient errors (429, RESOURCE_EXHAUSTED, rate-limit) are retried
+        with exponential backoff + jitter up to ``max_retries`` times.
+        """
         full_prompt = self._build_prompt(prompt, context)
 
         cmd = [
@@ -65,34 +75,64 @@ class GeminiCLIDriver(AgentDriver):
 
         logger.debug("gemini_invoke", model=self.model, prompt_len=len(full_prompt))
 
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=working_dir,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except TimeoutError:
-            logger.error("gemini_timeout", timeout=timeout)
-            return AgentResponse(
-                text="", success=False, error=f"Timeout after {timeout}s"
-            )
-        except FileNotFoundError:
-            return AgentResponse(
-                text="",
-                success=False,
-                error="gemini CLI not found. Install with: npm install -g @google/gemini-cli",
-            )
+        for attempt in range(self.max_retries + 1):
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=working_dir,
+                )
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout
+                )
+            except TimeoutError:
+                logger.error("gemini_timeout", timeout=timeout)
+                return AgentResponse(
+                    text="", success=False, error=f"Timeout after {timeout}s"
+                )
+            except FileNotFoundError:
+                return AgentResponse(
+                    text="",
+                    success=False,
+                    error="gemini CLI not found. Install with: npm install -g @google/gemini-cli",
+                )
 
-        if proc.returncode != 0:
-            err = stderr.decode(errors="replace").strip()
-            logger.error("gemini_error", returncode=proc.returncode, stderr=err[:500])
-            return AgentResponse(
-                text="", success=False, error=f"Exit code {proc.returncode}: {err[:500]}"
-            )
+            if proc.returncode != 0:
+                err = stderr.decode(errors="replace").strip()
 
-        return self._parse_json_output(stdout)
+                # Check if this is a retryable transient error
+                if attempt < self.max_retries and self._is_retryable(err):
+                    delay = (2**attempt) + random.uniform(0, 1)
+                    logger.warning(
+                        "gemini_retry",
+                        attempt=attempt + 1,
+                        max_retries=self.max_retries,
+                        delay=round(delay, 2),
+                        error=err[:200],
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
+                logger.error(
+                    "gemini_error", returncode=proc.returncode, stderr=err[:500]
+                )
+                return AgentResponse(
+                    text="",
+                    success=False,
+                    error=f"Exit code {proc.returncode}: {err[:500]}",
+                )
+
+            return self._parse_json_output(stdout)
+
+        # Should not reach here, but satisfy type checker
+        return AgentResponse(text="", success=False, error="Max retries exhausted")  # pragma: no cover
+
+    @staticmethod
+    def _is_retryable(error_text: str) -> bool:
+        """Check whether an error message indicates a transient rate-limit issue."""
+        lower = error_text.lower()
+        return any(pat.lower() in lower for pat in _RETRYABLE_PATTERNS)
 
     async def check_available(self) -> bool:
         """Check if gemini CLI is installed."""
@@ -139,8 +179,8 @@ class GeminiCLIDriver(AgentDriver):
         models = stats.get("models", {})
         for model_stats in models.values():
             tokens = model_stats.get("tokens", {})
-            prompt_tokens += tokens.get("inputTokens", 0)
-            completion_tokens += tokens.get("outputTokens", 0)
+            prompt_tokens += tokens.get("input", 0) or tokens.get("inputTokens", 0)
+            completion_tokens += tokens.get("candidates", 0) or tokens.get("outputTokens", 0)
 
         # Extract tool usage
         tool_stats = stats.get("tools", {})
