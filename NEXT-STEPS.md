@@ -14,42 +14,71 @@
 npx get-shit-done-cc
 ```
 
-Then run `/gsd:map-codebase` first — ctx-rm already has a working codebase with
-24 Python source files, 30 passing tests, full docs, and a CLI. The codebase
+Then run `/gsd:map-codebase` first — ctx-rm has a working codebase with
+40+ Python source files, 273 passing tests, full docs, and a CLI. The codebase
 mapper will understand the architecture before planning begins.
 
-After mapping, run `/gsd:new-project` or `/gsd:new-milestone` (since this is an
-existing project with a working v0.1.0). Feed it this document as context.
+After mapping, run `/gsd:new-milestone`. Feed it this document as context.
 
 ---
 
-## What Exists (v0.1.0 — Foundation)
+## What Exists (v0.2.0 — Engine Complete)
+
+> Sessions 1-6 on branch `iter/01-token-accounting` built the full engine.
+> 273 tests (247 unit + 26 integration), all green.
 
 ### Core Engine (`src/ctx_rm/core/`)
 - **`segment.py`** — Pydantic `Segment` model with 5-tier state (Active/Warm/Cold/Graveyard/Zombie), access tracking (recency, frequency, ref bit), eviction audit trail
-- **`bus.py`** — `ContextBus` central coordinator: ingest, score, evict, recall, render context, token budget enforcement with configurable headroom
-- **`graveyard.py`** — Full tiered store: `WarmCache` (in-memory LRU), `ColdStore` (SQLite with keyword search + audit log), `ZombieQueue` (page-fault staging), `TieredStore` (orchestrator for all tier transitions)
-- **`scorer.py`** — `HeuristicScorer` (exponential recency decay, log-scaled frequency, role weighting). Pluggable `Scorer` ABC.
-- **`policies/`** — Three eviction policies: `LRUPolicy`, `ClockPolicy` (PostgreSQL clock-sweep), `BudgetAwarePolicy` (composite score + LRU fallback)
+- **`bus.py`** — `ContextBus` central coordinator: ingest, score, evict, recall, render context, token budget enforcement with configurable headroom. `search_evicted()` wraps TieredStore.search_all()
+- **`graveyard.py`** — Full tiered store: `WarmCache` (in-memory LRU), `ColdStore` (SQLite with keyword search + embedding search + audit log), `ZombieQueue` (page-fault staging), `TieredStore` (orchestrator for all tier transitions). `search_all()` does word overlap for warm + embedding/keyword for cold
+- **`scorer.py`** — `HeuristicScorer` (exponential recency decay, log-scaled frequency, role weighting, **source_weight=0.3**). Pluggable `Scorer` ABC.
+- **`embedding.py`** — `EmbeddingProvider` ABC, `HashingEmbeddingProvider` (feature hashing, zero ML deps), `cosine_similarity_batch()`. Optional `SentenceTransformerProvider`.
+- **`tokenizer.py`** — tiktoken cl100k_base with char/4 fallback
+- **`policies/`** — Five eviction policies:
+  - `LRUPolicy` — Least Recently Used
+  - `ClockPolicy` — PostgreSQL-style second chance
+  - `BudgetAwarePolicy` — Composite score + LRU fallback (recommended default)
+  - `ARCPolicy` — T1/T2 + B1/B2 ghost lists, adaptive p parameter
+  - `InnoDBPolicy` — Split LRU with midpoint insertion at 3/8
+
+### Agent Loop (`src/ctx_rm/agents/`)
+- **`loop.py`** — `AgentLoop`: driver + tools + ContextBus + Watcher integration
+  - `_render_messages()` sorts system messages first
+  - `_try_recall()` searches warm+cold, recalls needle/context sources only
+  - Anti-thrashing via `_recalled_ids` set
+  - `enable_recall=False` by default, `recalls_made` tracked in `AgentResult`
+- **`tools.py`** — 6 sandboxed tools for the agent
 
 ### Background Watcher (`src/ctx_rm/watch/`)
 - **`watcher.py`** — Async background eviction loop with 4 trigger modes (interval, threshold, per-turn, hybrid)
 
-### CLI Drivers (`src/ctx_rm/drivers/`)
+### Drivers (`src/ctx_rm/drivers/`)
 - **`gemini.py`** — Drives `gemini -p --output-format json --yolo` via subprocess
 - **`claude.py`** — Drives `claude -p --output-format json --dangerously-skip-permissions` via subprocess
-- Both parse JSON responses for text, token usage, tool calls, timing
-
-### Telemetry (`src/ctx_rm/telemetry/`)
-- **`metrics.py`** — Records ingestion/eviction/recall events + per-turn snapshots. Exports to JSON.
+- **`llamacpp.py`** — HTTP driver for llama-server `/v1/chat/completions`
+- All parse JSON responses for text, token usage, tool calls, timing
 
 ### Benchmark Runner (`src/ctx_rm/benchmarks/`)
-- **`runner.py`** — Orchestrates 3 modes: Minimal (no history), ctx-rm (ContextBus + Watcher), Full (accumulate all). Drives agents per-turn.
+- **`runner.py`** — `AgentLoopRunner` orchestrates 3 modes (Minimal, ctx-rm, Full) + `enable_recall` flag
+- **`loader.py`** — YAML task loader → validated `BenchmarkSuite`
+- **`executor.py`** — Turn-by-turn executor with needle/noise injection
+- **`evaluator.py`** — 4 assertion types: `file_contains`, `file_not_contains`, `file_contains_in_order`, `file_equals`
+- **`fixtures.py`** — Fixture directory copy + isolation + cleanup
+- **`models.py`** — Pydantic v2 models for tasks, needles, eval checks
+
+### Integrations (`src/ctx_rm/integrations/`)
+- **`ollama_scorer.py`** — `OllamaScorer`: LLM scoring via local Ollama (15 mocked tests)
+- **`sentence_transformers.py`** — Optional embedding provider
 
 ### CLI (`src/ctx_rm/cli/`)
 - `ctx-rm info` — Shows drivers + components
-- `ctx-rm bench` — Run a benchmark session
-- `ctx-rm compare` — Compare results across modes
+- `ctx-rm tasks` — Lists all 10 benchmark tasks
+- `ctx-rm bench` — Run benchmarks (single task or `--all` batch mode)
+- `ctx-rm compare` — Compare results across modes/drivers/policies
+- Supports `--driver llamacpp`, `--policy` (all 5), `--scorer` (heuristic/ollama)
+
+### Telemetry (`src/ctx_rm/telemetry/`)
+- **`metrics.py`** — Records ingestion/eviction/recall events + per-turn snapshots. JSON export.
 
 ### Docs (`docs/`)
 - `architecture.md` — System design with CLI-first driver architecture
@@ -59,220 +88,276 @@ existing project with a working v0.1.0). Feed it this document as context.
 - `context_removal_benchmark_tasks.yaml` — 10 structured benchmark tasks with needle injection
 
 ### Tests
-- 30 tests covering: Segment model, ContextBus, all 3 policies, WarmCache, ColdStore, ZombieQueue, TieredStore (full tier cascade + recall)
+- 273 tests (247 unit + 26 integration), all passing
+- Coverage: segment model, ContextBus, all 5 policies, WarmCache, ColdStore, ZombieQueue, TieredStore, embeddings, tokenizer, agent loop, recall path, runner, evaluator, fixtures, CLI
 
-### Tech Stack
-- Python 3.12+, Astral `uv`, Pydantic v2, Typer, Rich, structlog, orjson, anyio, SQLite
+### Key Results (Session 6)
+
+| Config | Evictions | Recalls | Needle | Eval |
+|--------|-----------|---------|--------|------|
+| LRU (no recall) | 2 | 0 | DEAD | FAIL |
+| LRU + recall | 1 | 1 | ALIVE | PASS |
+| BudgetAware (no recall) | 1 | 0 | ALIVE | PASS |
+
+Recall path proven: evicted needles can be restored to active context via page-fault semantics.
 
 ---
 
-## What Needs to Be Built (Milestone 1: "Working Benchmarks")
+## Milestone 1 Remaining Work: "Benchmark Validation"
 
-The following phases should be planned and executed using GSD's
-`discuss → plan → execute → verify` cycle. Each phase is designed to be
-independently executable with fresh context.
+> Most of Milestone 1 was completed in sessions 1-6. These items remain.
 
-### Phase 1: Task YAML Loader & Fixture Generator
+### Phase 7: Task Redesign + Adaptation for Agent Loop
 
-**Goal:** Parse `docs/context_removal_benchmark_tasks.yaml` into executable
-multi-turn scenarios and generate the 10 mini-codebase fixtures.
+**Goal:** Current benchmark tasks (CR-001 through CR-010) were designed for CLI
+agents (gemini/claude subprocess). Adapt them for the custom AgentLoop +
+llamacpp driver path. Also design new tasks with realistic noise that exercises
+the agent's multi-tool capabilities.
+
+**What to do:**
+- Validate all 10 existing tasks work with the AgentLoop runner (currently only EVICT-001 and INTEG-001 validated)
+- Replace lorem-ipsum noise with realistic content (large file_read outputs, verbose tool results, irrelevant code context)
+- Design 3+ new tasks where context management changes the outcome:
+  - **MULTI-001 (Cross-file constraint)**: Needle specifies port 8443 + import constraint. Noise: 2000 tokens of unrelated Python docstrings. Eval: config.yaml contains 8443 AND app.py references config.
+  - **TRACE-001 (Bug hunt in log noise)**: Needle is "Root cause: KeyError on 'user_id' in auth.py line 42". Noise: 3000 tokens of verbose log output with red herrings. Eval: fix.py contains specific KeyError handling.
+  - **SPEC-001 (Config synthesis from spec)**: Needle is "Must proxy /api to localhost:3000 with SSL termination". Noise: 2000 tokens of existing nginx configs for other services. Eval: nginx.conf contains proxy_pass to localhost:3000.
+- Wire `--enable-recall` into CLI flags for bench command
+- Run all tasks × 3 modes × llamacpp and capture baseline results
+- Parametrized test covering all tasks × configs (budget, lru, lru+recall)
+
+**Success criteria:**
+- All tasks produce metrics.json + evaluation.json with llamacpp
+- At least 3 tasks show ctx-rm matching or beating full-context
+- At least 1 task where minimal fails but ctx-rm passes (noise matters)
+- `ctx-rm compare` generates a valid comparison table
+
+---
+
+### Phase 8: Agent Hardening
+
+**Goal:** Make the agent loop production-resilient for long benchmark runs.
 
 **What to build:**
-- `src/ctx_rm/benchmarks/task_loader.py` — YAML parser that reads task definitions (needles, context injections, success criteria, evaluation checks)
-- `src/ctx_rm/benchmarks/task_runner.py` — Turn-by-turn executor that injects needles at specified turns, adds noise at specified turns, and evaluates success criteria
-- `benchmarks/fixtures/` — 10 mini-repo fixtures (CR-001 through CR-010), each with the minimal codebase needed for the task (e.g., `fixtures/legacy_flag_cascade/` with `src/auth/legacy.py`, `config/flags.py`, etc.)
-- `src/ctx_rm/benchmarks/evaluator.py` — Evaluation engine that checks `file_contains`, `file_not_contains`, `file_contains_in_order`, `file_equals` assertions from the YAML
+- Retry logic for HTTP 503, timeout, connection reset from llama-server
+- Graceful handling of malformed tool call JSON from the LLM
+- Max context window tracking (`n_ctx` from `/v1/models` endpoint)
+- Error recovery: tool failure → agent can retry or skip
+- Wire all retry/error config into `CtxRmConfig`
 
-**Key decisions:**
-- Each fixture is a self-contained directory with its own files, ready to be copied to a temp dir for each benchmark run
-- Needle injection happens by prepending content to the agent's prompt at the specified turn
-- Context injections (noise) are synthetic blocks of specified token sizes
-- Evaluation runs after all turns complete by inspecting the fixture files
-
-**Tests needed:**
-- YAML loading and validation
-- Needle injection at correct turns
-- Evaluation assertions (all 4 check types)
-- Fixture directory structure validation
+**Success criteria:**
+- Agent handles all common error cases without crashing
+- 20-turn sessions complete reliably even with transient llama-server issues
 
 ---
 
-### Phase 2: Embedding-Based Search for ColdStore
+### Phase 9: CI & Coverage
 
-**Goal:** Replace the keyword-based `LIKE` search in `ColdStore` with vector
-similarity search, enabling semantic recall of evicted segments.
+**Goal:** GitHub Actions CI, coverage reporting, pre-commit.
 
 **What to build:**
-- Add `numpy`-based cosine similarity search (already a dependency)
-- `src/ctx_rm/core/embeddings.py` — Embedding provider interface + lightweight implementation using sentence hashing (for zero-dependency baseline) and optional integration with `sentence-transformers` or Gemini's embedding API
-- Update `ColdStore.persist()` to compute and store embeddings
-- Update `ColdStore.search()` to use cosine similarity when embeddings are available, fallback to keyword search
-- Update `TieredStore.search()` to pass query embeddings
-
-**Key decisions:**
-- Default: use a simple hashing-based approach (fast, no ML dependencies)
-- Optional: `sentence-transformers` for local embeddings or Gemini `text-embedding-004` via API
-- Store embeddings as BLOB in SQLite (numpy array serialized with `numpy.tobytes()`)
-- Search returns top-k by cosine similarity with a minimum threshold
-
-**Tests needed:**
-- Embedding computation and storage
-- Cosine similarity search returns relevant results
-- Fallback to keyword search when no embeddings
-- Round-trip: persist → search → retrieve
+- `.github/workflows/ci.yml` — Run tests + ruff on push/PR
+- `pytest-cov` configuration, target 90%+
+- Pre-commit hooks (ruff, type checking)
 
 ---
 
-### Phase 3: LLM-Based Scorer (Gemini Flash Lite)
+## Milestone 2: "Sequential Scoring" (NEW)
 
-**Goal:** Add an LLM-based scorer that uses a fast, cheap model to evaluate
-segment relevance to the current task.
+> **Inspired by**: "Sequential Attention for Feature Selection" (Yasuda et al., ICLR 2023)
+> — `docs/arXiv-2209.14881v3.tar.gz`
+>
+> **Core insight from the paper**: Feature importance is CONDITIONAL — a feature's
+> marginal value depends on what's already selected. Selecting one-at-a-time
+> (sequentially) with re-scoring beats one-shot selection. This is provably
+> equivalent to Orthogonal Matching Pursuit (OMP) for linear regression.
+>
+> **Adaptation to ctx-rm**: Replace independent segment scoring with conditional
+> scoring — evaluate each segment's marginal value relative to the retained set
+> AND the current task. Add a learning loop that adapts scoring weights from
+> eviction outcomes (page faults, eval failures) across the session.
+
+### Research Claims (Cascading)
+
+Three experiments, one story:
+
+1. **Conditional > Independent**: SequentialScorer (conditioned on retained set + task)
+   outperforms HeuristicScorer (independent scoring) on benchmark tasks.
+2. **Adaptive > Static**: A policy that adapts parameters from page-fault and eval
+   feedback outperforms fixed-parameter policies over multi-turn sessions.
+3. **Full Pipeline**: Background context removal with conditional scoring + adaptive
+   eviction + recall achieves full-context quality at a fraction of token cost —
+   and exceeds it on noisy tasks.
+
+---
+
+### Phase 1: SequentialScorer — Conditional Segment Scoring
+
+**Goal:** New `SequentialScorer` class that evaluates segment importance
+conditioned on (1) the current task, (2) the retained set, and (3) session
+feedback history.
 
 **What to build:**
-- `src/ctx_rm/core/scorer_llm.py` — `LLMScorer` that calls Gemini Flash Lite (via the Gemini Python SDK `google-genai`) to score segment relevance
-- The scorer receives: the current task/goal, the segment content, and minimal context
-- Returns a relevance score in [0, 1]
-- Batch scoring with rate limiting
-- Caching of scores to avoid redundant API calls
+- `src/ctx_rm/core/scorer_sequential.py` — `SequentialScorer` implementing the `Scorer` ABC
+- **Task-conditioned marginal loss framing**: The scorer LLM evaluates:
+  "Given the agent's current task is T, and segments Y,Z are retained,
+  what critical information is lost if segment X is removed?"
+- Returns `relevance_score`, `staleness_score`, `redundancy_score`, `composite_score`
+  — same interface as HeuristicScorer but with conditional logic
+- **Configurable scorer LLM**: Default to a cheap model (qwen2.5 via Ollama, or
+  Gemini Flash Lite). Option to use the same model as the agent for highest fidelity.
+- Score caching keyed by (segment_hash, retained_set_hash, task_hash)
 
-**Key decisions:**
-- This is the ONE place where we use the Gemini SDK (not CLI) — scoring is a cheap, fast API call, not an agent task. Gemini Flash Lite is essentially free.
-- Scoring prompt should be minimal: "Rate the relevance of this content to the task on a scale of 0-1" with structured output
-- Cache scores keyed by (segment_hash, task_hash) to avoid re-scoring
-- Make this optional — `HeuristicScorer` remains the default, `LLMScorer` is opt-in via config
+**Key design decisions:**
+- The scorer LLM prompt includes: task description, summary of retained segments
+  (not full content — token-efficient), and the candidate segment's full content
+- Redundancy is measured conditionally: "how much of X's information is already
+  covered by the retained set?" — not pairwise similarity
+- Falls back to HeuristicScorer on LLM failure
+
+**Paper analog:** This is the attention weight computation in Sequential Attention —
+the softmax over unselected features conditioned on the already-selected set.
+In the paper, the model jointly optimizes attention weights and task loss. Here,
+the scorer LLM approximates the marginal gain signal that greedy forward selection /
+OMP would compute exactly (but expensively).
 
 **Tests needed:**
-- Mock the Gemini API call
-- Score caching works
-- Batch scoring respects rate limits
-- Fallback to heuristic on API failure
+- Conditional scoring returns different scores for same segment with different retained sets
+- Task conditioning changes scores (same segment, same retained set, different task)
+- Score cache hit/miss behavior
+- Fallback to HeuristicScorer on LLM failure
+- A/B test harness: run same task with HeuristicScorer vs SequentialScorer
 
 ---
 
-### Phase 4: End-to-End Benchmark Pipeline
+### Phase 2: Adaptive Batch Eviction
 
-**Goal:** Wire everything together so `ctx-rm bench` runs a complete benchmark
-with real agents, real tasks, and produces analyzable results.
+**Goal:** Replace fixed batch eviction with adaptive batch sizing — one-at-a-time
+near budget, batch more aggressively when far over.
 
 **What to build:**
-- Update `BenchmarkRunner` to use `TaskLoader` for loading YAML tasks
-- Update `BenchmarkRunner` to use `TaskRunner` for turn-by-turn execution with needle injection
-- Update `BenchmarkRunner` to use `Evaluator` for post-run assessment
-- Add `ctx-rm bench --task CR-001 --mode ctx-rm --driver gemini` full pipeline
-- Add `ctx-rm bench --all` to run all 10 tasks × 3 modes × 2 drivers
-- Results include: metrics JSON + evaluation pass/fail + agent response logs
-- `benchmarks/analysis/compare.py` — Script to generate comparison tables from results
+- Update eviction policies to support adaptive batch sizing
+- When context utilization is 85-100% of budget: evict one segment, re-score
+  remaining, evict next (maximum adaptivity, mirrors paper's k=1 finding)
+- When far over budget (e.g., sudden large ingest): batch evict to get within
+  range, then switch to one-at-a-time for fine-tuning
+- Add `batch_mode` parameter to `select_evictions()`: `"fixed"` (current behavior)
+  or `"adaptive"` (new)
 
-**Key decisions:**
-- Each benchmark run creates a temp copy of the fixture directory
-- Agent runs in the temp dir so file modifications are isolated
-- After all turns, evaluator checks the files in the temp dir
-- Results go to `results/{task_id}/{mode}/{driver}/` with metrics.json + evaluation.json
-- The `compare` command reads all results and generates a summary table
+**Paper analog:** The paper's adaptivity experiments (Appendix) show that selecting
+1 feature at a time yields accuracy 0.963 on MNIST, while selecting 64 at once
+drops to 0.932. Quality degrades gradually with batch size, not as a cliff.
+The adaptive approach gives us the best of both: precision where it matters,
+speed where it doesn't.
 
 **Tests needed:**
-- Full pipeline integration test with a mock driver
-- Results directory structure is correct
-- Evaluation results are recorded alongside metrics
-- Compare command produces valid output
+- Adaptive mode evicts one-at-a-time near budget threshold
+- Adaptive mode batches when far over budget
+- Quality comparison: adaptive vs fixed batch on benchmark tasks
 
 ---
 
-### Phase 5: Advanced Eviction Policies
+### Phase 3: Three-Layer Learning Loop
 
-**Goal:** Implement ARC (Adaptive Replacement Cache) and InnoDB-style admission
-control as described in `docs/tiered_graveyard.md`.
+**Goal:** The scorer and policy adapt their parameters from session feedback,
+mirroring how the paper's model jointly optimizes attention weights and task loss
+during training.
+
+**Three learning layers:**
+
+| Layer | What Adapts | Speed | Feedback Signal |
+|-------|------------|-------|-----------------|
+| **Source weights** | Per-source-type multipliers (needle, context, tool, assistant, user_task, user_message) | Fast (per-turn) | Page fault source types — if needles keep getting recalled, boost needle weight |
+| **Importance cache** | LLM-scored per-segment values | Medium (on feedback events) | Recall events: recalled segment gets score boost. Eval failure: segments with content related to failed check get boost. Anti-thrashing: segments recalled then re-evicted get penalty |
+| **Policy parameters** | Balance between recency/frequency/redundancy/role | Slow (phase transitions) | Cumulative session statistics: recall rate, eval pass rate, eviction churn. If recall rate is high → shift toward conservative retention. If context is stale → shift toward aggressive eviction |
+
+**Phase-aware continuous adaptation:**
+- No explicit time-based phases. Adaptation is continuous.
+- **Event-driven phase transitions** change the adaptation regime:
+  - Page fault → shift to more conservative scoring (reduce eviction aggressiveness)
+  - Eval check failure → boost scores of segments with related content
+  - Period of zero recalls → shift to more aggressive eviction (context is well-managed)
+- This mirrors ARC's adaptive p parameter but generalized across all three layers
+
+**Paper analog:** In Sequential Attention, the model weights and attention weights
+are jointly optimized by gradient descent. The training loop IS the learning loop.
+In ctx-rm, the agent loop (turn-by-turn execution) plays the role of the training
+loop, and page faults / eval outcomes play the role of training loss. The three
+layers correspond to: attention logits (source weights), model weights
+(importance cache), and training schedule (policy parameters).
 
 **What to build:**
-- `src/ctx_rm/core/policies/arc.py` — Full ARC implementation with T1/T2 (recency/frequency) + B1/B2 ghost lists. Adaptive parameter `p` shifts balance based on ghost hits.
-- `src/ctx_rm/core/policies/innodb.py` — InnoDB-style split LRU: new segments enter "old" sublist, promote to "new" only on re-access. Prevents one-time large reads from polluting active context.
-- Update `WarmCache` to support ARC ghost list integration (record evictions in B1/B2)
-- Update `ContextBus` to support admission control (route large tool outputs to Warm instead of Active)
-
-**Key decisions:**
-- ARC's `p` parameter starts at 0 and adapts based on B1/B2 hits (favor recency vs frequency)
-- InnoDB's midpoint insertion: new segments start at position 3/8 from the "hot" end
-- Admission control: segments with `source` matching `file_read:*` or `tool:*` and `token_count > threshold` go directly to Warm
-- These are opt-in policies selectable via `--policy arc` or `--policy innodb`
+- `src/ctx_rm/core/feedback.py` — `FeedbackTracker` that records events:
+  - `on_recall(segment)` — page fault happened
+  - `on_eval_result(check, passed)` — evaluation outcome
+  - `on_eviction(segment)` — segment was evicted
+  - `on_re_eviction(segment)` — segment was recalled then evicted again (churn)
+- `src/ctx_rm/core/adaptive.py` — `AdaptiveWeights` that maintains the three layers:
+  - `source_weights: dict[str, float]` — per-source multipliers, updated per-turn
+  - `importance_adjustments: dict[str, float]` — per-segment score adjustments, updated on events
+  - `policy_params: dict[str, float]` — recency/frequency/redundancy balance, updated on phase transitions
+- Wire `FeedbackTracker` into `ContextBus` (on_evict, on_recall hooks exist)
+- Wire `AdaptiveWeights` into `SequentialScorer` (modifies scores before eviction)
 
 **Tests needed:**
-- ARC adapts `p` on ghost hits
-- ARC balances recency vs frequency correctly
-- InnoDB midpoint insertion works
-- InnoDB promotes on re-access only
-- Admission control routes large segments to Warm
+- Source weights update on recall events (needle recall → needle weight increases)
+- Importance cache updates on eval failure (related segment scores boosted)
+- Policy parameters shift on phase transitions (high recall rate → conservative shift)
+- Full session simulation: inject feedback events, verify adaptation trajectory
+- Regression: adapted weights should improve recall-to-eviction ratio over a session
 
 ---
 
-### Phase 6: Comprehensive Test Suite & CI
+### Phase 4: Experiment Framework & A/B Harness
 
-**Goal:** Achieve high test coverage, add integration tests, and set up GitHub
-Actions CI.
+**Goal:** Run the three cascading experiments to support the research claims.
 
 **What to build:**
-- Integration tests for the full pipeline (with mock drivers)
-- Async tests for the Watcher
-- Property-based tests for eviction policies (hypothesis library)
-- `tests/drivers/test_gemini.py` and `tests/drivers/test_claude.py` — Test JSON parsing with real response fixtures
-- `.github/workflows/ci.yml` — Run tests + lint on push/PR
-- `.github/workflows/bench.yml` — Run benchmarks on schedule (optional, manual trigger)
-- Add `pytest-cov` configuration for coverage reporting
+- Experiment configs (YAML or Python) for each comparison:
+  1. SequentialScorer vs HeuristicScorer (same policy, same tasks)
+  2. Adaptive policy vs static policy (same scorer, same tasks)
+  3. Full system: ctx-rm-sequential vs ctx-rm-heuristic vs full-context vs minimal
+- Metrics to capture per experiment:
+  - Token usage (ingested, evicted, recalled, net active)
+  - Recall rate (page faults per turn)
+  - Eval pass rate (per check, per task)
+  - Eviction precision (% of evicted segments that were never recalled)
+  - Adaptation trajectory (source weights, policy params over time)
+- Results aggregation with confidence intervals across multiple runs
+- Comparison tables and charts for the research paper
 
-**Tests needed:**
-- Watcher async tests (start, eviction cycle, stop)
-- Driver JSON parsing with fixture data
-- Full pipeline integration (task load → execute → evaluate)
-- Edge cases: empty context, budget=0, recall from empty store
-- Coverage target: 90%+
-
----
-
-## GSD Phase-to-Work Mapping
-
-When running `/gsd:new-milestone`, propose this roadmap:
-
-| GSD Phase | ctx-rm Work | Dependencies | Parallelizable |
-|-----------|-------------|--------------|----------------|
-| Phase 1 | Task YAML Loader & Fixtures | None | — |
-| Phase 2 | Embedding-Based Search | None | Yes (with Phase 1) |
-| Phase 3 | LLM-Based Scorer | None | Yes (with Phase 1, 2) |
-| Phase 4 | End-to-End Pipeline | Phase 1 | — |
-| Phase 5 | Advanced Eviction Policies | None | Yes (with Phase 4) |
-| Phase 6 | Test Suite & CI | All above | — |
-
-**Parallel execution opportunities:**
-- Phases 1, 2, 3 are independent and can be planned/executed in parallel
-- Phase 4 depends on Phase 1 (needs the task loader)
-- Phase 5 is independent of 1-4 (pure core engine work)
-- Phase 6 is the final integration phase
+**Success criteria:**
+- Experiment 1: SequentialScorer achieves ≥ equal eval pass rate at ≤ token cost vs HeuristicScorer on ≥ 7/10 tasks
+- Experiment 2: Adaptive policy reduces recall rate (fewer page faults) compared to static, without degrading eval pass rate
+- Experiment 3: Full ctx-rm-sequential system matches full-context quality on ≥ 8/10 tasks and exceeds it on ≥ 2 noisy tasks
 
 ---
 
-## Context for GSD Discussion Phases
+## Architecture Decisions (Locked)
 
-When running `/gsd:discuss-phase`, here are the key decisions already made:
+- **CLI-first**: Agents driven via `gemini -p`, `claude -p`, or `llamacpp` HTTP. No SDK-based agents.
+- **Tiered storage**: Active → Warm → Cold → Graveyard → Zombie
+- **Async background eviction**: Watcher runs as `asyncio.create_task()`, never blocks the agent
+- **Pluggable everything**: Policies, scorers, embedding providers, drivers all implement ABCs
+- **Two brains**: Task agent and scoring brain are separate processes. Scorer LLM defaults to cheap model, configurable to match agent model for highest fidelity.
+- **Pydantic v2** for all data models
+- **SQLite** for persistence (ColdStore), no external dependencies
 
-### Architecture Decisions (Locked)
-- **CLI-first**: Agents are driven via `gemini -p` and `claude -p` in headless mode. No SDK-based agents. Uses existing subscriptions (no API costs for agent execution).
-- **Tiered storage**: Active → Warm → Cold → Graveyard → Zombie (see `docs/tiered_graveyard.md`)
-- **Async background eviction**: The Watcher runs as `asyncio.create_task()`, never blocks the agent
-- **Pluggable policies**: All eviction policies implement `EvictionPolicy` ABC
-- **Pydantic models**: All data models use Pydantic v2
-- **SQLite for persistence**: ColdStore uses SQLite, no external dependencies
+## Architecture Decisions (New — Milestone 2)
 
-### Tech Preferences (Locked)
+- **SequentialScorer** is a new class, not a modification of HeuristicScorer. Clean A/B comparison.
+- **Scorer LLM is configurable**: `--scorer-model` flag. Default: cheap (qwen2.5/Gemini Flash Lite). Option: same as agent.
+- **Three learning layers** (source weights, importance cache, policy params) are independent modules wired via events, not tightly coupled.
+- **Adaptive batch eviction** is opt-in via `--batch-mode adaptive`. Fixed batch remains default for backward compatibility.
+- **Recall source filter** remains: only recall needle/context/user_task/user_message. Never recall assistant_tool_call or tool (pair integrity).
+
+## Tech Preferences (Locked)
+
 - Python 3.12+, Astral `uv` for package management
 - `structlog` for structured logging
 - `orjson` for fast JSON serialization
 - `typer` + `rich` for CLI
 - `pytest` + `pytest-asyncio` for tests
 - `ruff` for linting
-
-### Open Questions (For Discussion)
-- **Scoring prompt design**: What prompt should the LLM scorer use? How much context to include?
-- **Fixture complexity**: Should fixtures be minimal (just the files needed) or realistic (full project structure)?
-- **Benchmark task difficulty**: The 10 tasks in the YAML may need tuning after initial runs
-- **Embedding model choice**: Sentence-transformers local vs Gemini API? Trade-off: latency vs quality
 
 ---
 
@@ -283,46 +368,36 @@ Before planning any phase, read these files for full context:
 | File | Why |
 |------|-----|
 | `README.md` | Project overview, architecture diagram, positioning |
-| `docs/architecture.md` | System design, CLI driver architecture |
-| `docs/tiered_graveyard.md` | OS/DB theory → tier design (LRU/CLOCK/ARC/2Q) |
-| `docs/competitive_analysis.md` | How ctx-rm differs from MemAct, SWE-Pruner, ACON |
-| `docs/context_removal_benchmark_tasks.yaml` | The 10 benchmark task definitions |
-| `src/ctx_rm/core/bus.py` | Central coordinator (the heart of the system) |
-| `src/ctx_rm/core/graveyard.py` | Tiered store implementation |
-| `src/ctx_rm/benchmarks/runner.py` | Current benchmark runner (to be extended) |
-| `src/ctx_rm/drivers/base.py` | Agent driver interface |
-| `pyproject.toml` | Dependencies and project configuration |
-
----
-
-## Success Criteria for Milestone 1
-
-The milestone is complete when:
-
-1. **`ctx-rm bench --task CR-001 --mode ctx-rm --driver gemini`** completes end-to-end: loads task, creates fixture, runs 20+ turns with needle injection and noise, evaluates success criteria, exports metrics
-2. **All 3 modes** (minimal, ctx-rm, full) produce comparable results for at least 3 tasks
-3. **`ctx-rm compare`** generates a table showing token usage, eviction stats, and task success across modes
-4. **At least one task** demonstrates ctx-rm outperforming full-context (noise reduction tasks: CR-004, CR-005, CR-006)
-5. **Test coverage ≥ 90%** with CI running on every push
-6. **All 10 fixture repos** exist and are validated
+| `src/ctx_rm/core/bus.py` | Central coordinator (ingest/score/evict/recall) |
+| `src/ctx_rm/core/scorer.py` | Current HeuristicScorer — the baseline to beat |
+| `src/ctx_rm/core/graveyard.py` | Tiered store + search_all() for recall |
+| `src/ctx_rm/agents/loop.py` | Agent loop with _try_recall() |
+| `src/ctx_rm/benchmarks/runner.py` | AgentLoopRunner — 3 modes + enable_recall |
+| `src/ctx_rm/core/policies/budget.py` | BudgetAwarePolicy — uses composite_score |
+| `src/ctx_rm/core/policies/arc.py` | ARCPolicy — adaptive p parameter (inspiration for Phase 3) |
+| `src/ctx_rm/integrations/ollama_scorer.py` | OllamaScorer — existing LLM scoring path |
+| `docs/tiered_graveyard.md` | OS/DB theory → tier design |
+| `docs/arXiv-2209.14881v3.tar.gz` | Sequential Attention paper (ICLR 2023) |
 
 ---
 
 ## Future Milestones (Not Yet Planned)
 
-### Milestone 2: "MCP Server & Agent Integration"
+### Milestone 3: "MCP Server & Agent Integration"
 - Expose ctx-rm as an MCP server with tools: `score_context`, `evict_chunk`, `recall_chunk`, `search_graveyard`
 - Agent skill file (.md) that teaches agents how to invoke ctx-rm
 - Hook-based integration: `BeforeAgent` hook for Gemini CLI, `PostToolUse` hook for Claude Code
 - Real-time `stream-json` monitoring
 
-### Milestone 3: "Research Paper"
-- Run full benchmark suite across all tasks × modes × drivers × policies
+### Milestone 4: "Research Paper"
+- Run full benchmark suite: all tasks × modes × drivers × policies × scorers
+- Three cascading experiments (conditional > independent, adaptive > static, full system)
 - Statistical analysis with confidence intervals
-- Generate publication-quality charts (Apache ECharts or matplotlib)
-- Write up findings as a research paper draft
+- Generate publication-quality charts
+- Write up findings — position against MemAct, SWE-Pruner, ACON, Sequential Attention
+- Cite the OS/DB analogy (original contribution) AND the Sequential Attention adaptation (Milestone 2 contribution)
 
-### Milestone 4: "Production Packaging"
+### Milestone 5: "Production Packaging"
 - `pip install ctx-rm` distribution
 - PyPI publishing
 - Docker image for isolated benchmarking
