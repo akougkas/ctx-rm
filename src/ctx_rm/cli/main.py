@@ -840,3 +840,264 @@ def _print_experiment_table(aggregated: list) -> None:
     console.print()
     console.print(table)
 
+
+# ── analyze ─────────────────────────────────────────────────────────────────
+
+
+class AnalysisType(StrEnum):
+    eviction = "eviction"
+    recall = "recall"
+    budget = "budget"
+    scaling = "scaling"
+    noise = "noise"
+    all = "all"
+
+
+@app.command()
+def analyze(
+    results_dir: Annotated[Path, typer.Argument(help="Experiment results directory.")],
+    analysis: Annotated[AnalysisType, typer.Option(
+        help="Analysis type: eviction, recall, budget, scaling, noise, all.",
+    )] = AnalysisType.all,
+) -> None:
+    """Analyze experiment results and display evidence tables.
+
+    Reads experiment output directories and presents Rich evidence tables
+    for each analysis type (eviction accuracy, recall, budget knee, scaling, noise).
+
+    Usage:  ctx-rm analyze ./results/experiments/eviction-accuracy
+    """
+    _quiet_logs()
+
+    if not results_dir.is_dir():
+        console.print(f"\n  [dim]Directory not found: {results_dir}[/dim]\n")
+        raise typer.Exit(1)
+
+    from ctx_rm.benchmarks.analyzer import (
+        compute_budget_knee,
+        compute_eviction_accuracy,
+        compute_scaling_quality,
+        find_knee_point,
+        find_noise_degradation,
+    )
+
+    shown = 0
+
+    # ── Eviction accuracy ──
+    if analysis in (AnalysisType.eviction, AnalysisType.all):
+        rows = compute_eviction_accuracy(results_dir)
+        if rows:
+            table = Table(
+                title="Eviction Accuracy",
+                show_lines=False,
+                title_style="bold",
+                header_style="bold cyan",
+                border_style="dim",
+            )
+            table.add_column("Task", style="bold")
+            table.add_column("Policy")
+            table.add_column("Noise", justify="right", style="green")
+            table.add_column("Needle", justify="right", style="red")
+            table.add_column("Other", justify="right", style="dim")
+            table.add_column("Noise %", justify="right")
+            table.add_column("Total", justify="right", style="dim")
+
+            for r in rows:
+                if r.noise_ratio is not None:
+                    ratio_display = f"[bold green]{r.noise_ratio:.0%}[/bold green]" if r.noise_ratio >= 0.8 else (
+                        f"[yellow]{r.noise_ratio:.0%}[/yellow]" if r.noise_ratio >= 0.5 else
+                        f"[red]{r.noise_ratio:.0%}[/red]"
+                    )
+                else:
+                    ratio_display = "[dim]--[/dim]"
+
+                table.add_row(
+                    r.task_id, r.policy,
+                    str(r.noise_evictions), str(r.needle_evictions), str(r.other_evictions),
+                    ratio_display, str(r.total_evictions),
+                )
+
+            console.print()
+            console.print(table)
+            shown += 1
+        elif analysis == AnalysisType.eviction:
+            console.print("\n  [dim]No eviction data found.[/dim]")
+
+    # ── Scaling quality ──
+    if analysis in (AnalysisType.scaling, AnalysisType.all):
+        rows = compute_scaling_quality(results_dir)
+        if rows:
+            table = Table(
+                title="Context Window Scaling",
+                show_lines=False,
+                title_style="bold",
+                header_style="bold cyan",
+                border_style="dim",
+            )
+            table.add_column("Task", style="bold")
+            table.add_column("Budget", justify="right")
+            table.add_column("Pass Rate", justify="center")
+            table.add_column("Med Tokens", justify="right", style="dim")
+            table.add_column("Full Rate", justify="center")
+
+            for r in rows:
+                if r.pass_rate >= 1.0:
+                    rate_display = f"[bold green]{r.pass_rate:.0%}[/bold green]"
+                elif r.pass_rate > 0:
+                    rate_display = f"[yellow]{r.pass_rate:.0%}[/yellow]"
+                else:
+                    rate_display = f"[bold red]{r.pass_rate:.0%}[/bold red]"
+
+                full_display = f"{r.full_mode_pass_rate:.0%}" if r.full_mode_pass_rate > 0 else "[dim]--[/dim]"
+
+                table.add_row(
+                    r.task_id, f"{r.budget:,}",
+                    rate_display, f"{r.median_prompt_tokens:,.0f}",
+                    full_display,
+                )
+
+            console.print()
+            console.print(table)
+            shown += 1
+        elif analysis == AnalysisType.scaling:
+            console.print("\n  [dim]No scaling data found.[/dim]")
+
+    # ── Noise degradation ──
+    if analysis in (AnalysisType.noise, AnalysisType.all):
+        rows = find_noise_degradation(results_dir)
+        if rows:
+            table = Table(
+                title="Noise Degradation Analysis",
+                show_lines=False,
+                title_style="bold",
+                header_style="bold cyan",
+                border_style="dim",
+            )
+            table.add_column("Task", style="bold")
+            table.add_column("ctx-rm Rate", justify="center")
+            table.add_column("Full Rate", justify="center")
+            table.add_column("Delta", justify="center")
+            table.add_column("Candidate", justify="center")
+            table.add_column("Runs", justify="right", style="dim")
+
+            for r in rows:
+                ctx_display = f"{r.ctx_rm_pass_rate:.0%}"
+                full_display = f"{r.full_pass_rate:.0%}"
+
+                if r.delta > 0:
+                    delta_display = f"[bold green]+{r.delta:.0%}[/bold green]"
+                elif r.delta < 0:
+                    delta_display = f"[red]{r.delta:.0%}[/red]"
+                else:
+                    delta_display = "[dim]0%[/dim]"
+
+                candidate_display = "[bold green]YES[/bold green]" if r.is_degradation_candidate else "[dim]no[/dim]"
+
+                table.add_row(
+                    r.task_id, ctx_display, full_display,
+                    delta_display, candidate_display, str(r.num_runs),
+                )
+
+            console.print()
+            console.print(table)
+            shown += 1
+        elif analysis == AnalysisType.noise:
+            console.print("\n  [dim]No noise degradation data found.[/dim]")
+
+    # ── Budget knee ──
+    if analysis in (AnalysisType.budget, AnalysisType.all):
+        knee_rows = compute_budget_knee(results_dir)
+        if knee_rows:
+            table = Table(
+                title="Budget Knee Analysis",
+                show_lines=False,
+                title_style="bold",
+                header_style="bold cyan",
+                border_style="dim",
+            )
+            table.add_column("Task", style="bold")
+            table.add_column("Budget", justify="right")
+            table.add_column("Pass Rate", justify="center")
+            table.add_column("Med Tokens", justify="right", style="dim")
+            table.add_column("Med Evictions", justify="right")
+
+            for r in knee_rows:
+                if r.pass_rate >= 1.0:
+                    rate_display = f"[bold green]{r.pass_rate:.0%}[/bold green]"
+                elif r.pass_rate > 0:
+                    rate_display = f"[yellow]{r.pass_rate:.0%}[/yellow]"
+                else:
+                    rate_display = f"[bold red]{r.pass_rate:.0%}[/bold red]"
+
+                budget_display = f"{r.budget:,}" if r.budget < 1_000_000 else "full"
+
+                table.add_row(
+                    r.task_id, budget_display,
+                    rate_display, f"{r.median_prompt_tokens:,.0f}",
+                    f"{r.median_eviction_count:.0f}",
+                )
+
+            console.print()
+            console.print(table)
+
+            # Find and display knee points per task
+            tasks = sorted(set(r.task_id for r in knee_rows))
+            for task_id in tasks:
+                task_rows = [r for r in knee_rows if r.task_id == task_id]
+                full_rows = [r for r in task_rows if r.budget >= 1_000_000]
+                if full_rows:
+                    knee = find_knee_point(task_rows, full_rows[0].pass_rate)
+                    if knee:
+                        console.print(
+                            f"  [bold]{task_id}[/bold] knee: budget={knee.knee_budget:,}  "
+                            f"savings={knee.token_savings_pct:.0f}%"
+                        )
+
+            shown += 1
+        elif analysis == AnalysisType.budget:
+            console.print("\n  [dim]No budget knee data found.[/dim]")
+
+    # ── Recall comparison (needs two dirs) ──
+    if analysis in (AnalysisType.recall, AnalysisType.all):
+        # Look for recall-on / recall-off subdirectories
+        recall_on = results_dir / "recall-on"
+        recall_off = results_dir / "recall-off"
+        if recall_on.is_dir() and recall_off.is_dir():
+            from ctx_rm.benchmarks.analyzer import compute_recall_comparison
+
+            rows = compute_recall_comparison(recall_on, recall_off)
+            if rows:
+                table = Table(
+                    title="Recall Comparison",
+                    show_lines=False,
+                    title_style="bold",
+                    header_style="bold cyan",
+                    border_style="dim",
+                )
+                table.add_column("Task", style="bold")
+                table.add_column("Rate (on)", justify="center")
+                table.add_column("Rate (off)", justify="center")
+                table.add_column("Tokens (on)", justify="right", style="dim")
+                table.add_column("Tokens (off)", justify="right", style="dim")
+                table.add_column("Med Recalls", justify="right")
+
+                for r in rows:
+                    on_display = f"[bold green]{r.pass_rate_on:.0%}[/bold green]" if r.pass_rate_on >= r.pass_rate_off else f"{r.pass_rate_on:.0%}"
+                    off_display = f"{r.pass_rate_off:.0%}"
+
+                    table.add_row(
+                        r.task_id, on_display, off_display,
+                        f"{r.median_tokens_on:,.0f}", f"{r.median_tokens_off:,.0f}",
+                        f"{r.recall_count_median:.0f}",
+                    )
+
+                console.print()
+                console.print(table)
+                shown += 1
+        elif analysis == AnalysisType.recall:
+            console.print("\n  [dim]No recall-on/recall-off subdirectories found.[/dim]")
+
+    if shown == 0 and analysis == AnalysisType.all:
+        console.print("\n  [dim]No analyzable data found in this directory.[/dim]")
+
+    console.print()
