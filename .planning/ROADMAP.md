@@ -1,88 +1,91 @@
 # Roadmap: ctx-rm
 
-## Overview
+## Milestones
 
-Transform ctx-rm from a single-datapoint proof of concept into a statistically validated system by hardening the agent, building heavyweight scenarios that force eviction at scale, automating experiment runs, and producing reproducible evidence that eviction + recall beats naive context management.
+- v1.0 Evidence Infrastructure - Phases 1-4 (shipped 2026-02-08)
+- v1.1 Experimental Validation - Phases 5-6 (in progress)
 
 ## Phases
 
-- [x] **Phase 1: Agent Hardening** - Make the agent competent enough to prove the thesis
-- [ ] **Phase 2: Scenarios & Accuracy** - Heavyweight scenarios, scoring/recall improvements, budget calibration
-- [ ] **Phase 3: Experiment Framework** - Automated multi-config comparison runs with structured output
-- [ ] **Phase 4: Evidence** - Run experiments and produce the proof data
-
-## Phase Details
+<details>
+<summary>v1.0 Evidence Infrastructure (Phases 1-4) - SHIPPED 2026-02-08</summary>
 
 ### Phase 1: Agent Hardening
-**Goal**: Agent can solve multi-step coding tasks using tools effectively, terminate cleanly, and recover from errors
-**Depends on**: Nothing (first phase)
-**Requirements**: TOOL-01, TOOL-02, TOOL-03, TOOL-04, LOOP-01, LOOP-02, LOOP-03, LOOP-04
-**Success Criteria** (what must be TRUE):
-  1. Agent calls `done` tool with structured result when task is complete, and the loop terminates cleanly
-  2. Agent reads partial files (line ranges) and uses grep with filters/limits instead of dumping entire files into context
-  3. System prompt guides agent through read-before-write workflow and change verification without mentioning context management
-  4. After 3+ consecutive failed tool calls, loop injects a hint and agent recovers
-  5. Each turn's tool call, outcome, and token count are logged and visible in post-run output
+**Goal**: Agent can reliably complete multi-step tasks without hallucination or tool misuse
 **Plans**: 2 plans
 
 Plans:
-- [x] 01-01-PLAN.md -- Tool upgrades (done tool, file_read line ranges, grep_search filters, run_shell exit codes)
-- [x] 01-02-PLAN.md -- Loop improvements (done handling, system prompt, turn logging, failure hints)
+- [x] 01-01: Done tool and tool output improvements
+- [x] 01-02: System prompt, failure hints, turn logging
 
-### Phase 2: Scenarios & Accuracy
-**Goal**: Heavyweight scenarios exist that force real eviction pressure, and scoring/recall improvements keep the right information active
-**Depends on**: Phase 1
-**Requirements**: SCEN-01, SCEN-02, SCEN-03, SCEN-04, SCORE-01, RECALL-01, RECALL-02, RECALL-03, ADM-01
-**Success Criteria** (what must be TRUE):
-  1. SCALE-001/002/003 scenarios run end-to-end with 20K/30K/40K+ token context pressure respectively
-  2. Budget calibration produces >3 eviction cycles per ctx-rm run on every task
-  3. HeuristicScorer uses configurable per-source weights (needle:0.9 evicts last, noise:0.1 evicts first)
-  4. Previously-evicted file content is recalled automatically when agent re-reads that file, bounded by a per-turn recall budget
-  5. Recall precision is tracked and reported (% of recalls that appeared in subsequent tool calls)
+### Phase 2: Scenarios and Accuracy
+**Goal**: Heavyweight benchmark scenarios that force real eviction pressure, with calibrated budgets
 **Plans**: 3 plans
 
 Plans:
-- [x] 02-01-PLAN.md -- Heavyweight scenarios (SCALE-001/002/003 fixture creation, task YAML, evaluators) [wave 1]
-- [x] 02-02-PLAN.md -- Scoring and recall improvements (per-source weights, content-based recall, recall budget, precision tracking) [wave 1]
-- [x] 02-03-PLAN.md -- Budget calibration and admission tuning (calibrate all tasks, tune admission threshold from profiled file sizes) [wave 2, depends on 02-01]
+- [x] 02-01: SCALE scenarios (20K/30K/40K tokens)
+- [x] 02-02: Budget calibration and admission tuning
+- [x] 02-03: Content-based recall with precision tracking
 
 ### Phase 3: Experiment Framework
-**Goal**: A single CLI command runs all experiment combinations and produces structured comparison output
-**Depends on**: Phase 2
-**Requirements**: EXPR-01, EXPR-02, EXPR-03
-**Success Criteria** (what must be TRUE):
-  1. `ctx-rm experiment` accepts a YAML config specifying tasks, modes, policies, budgets, and N runs
-  2. Per-config output includes median tokens, pass rate, eviction count, and recall count
-  3. Results are displayed as a Rich comparison table and exported as CSV
+**Goal**: Automated multi-config experiment runner with YAML configs and output formats
 **Plans**: 1 plan
 
 Plans:
-- [x] 03-01-PLAN.md -- Experiment config model, combination runner, aggregation, Rich table, CSV export
+- [x] 03-01: Experiment CLI, YAML config, Rich tables, CSV export
 
-### Phase 4: Evidence
-**Goal**: Reproducible data proves that ctx-rm eviction + recall outperforms naive context management on heavyweight workloads
-**Depends on**: Phase 3
-**Requirements**: EVID-01, EVID-02, EVID-03, EVID-04, EVID-05
-**Success Criteria** (what must be TRUE):
-  1. Eviction accuracy data shows BudgetAware evicts >80% noise segments before any needle, compared against LRU baseline
-  2. SCALE-003 pass rate with recall enabled is measurably higher than with recall disabled
-  3. Budget sweep on SPEC-001 (1K-100K) identifies the knee where ctx-rm matches full mode at minimal token cost
-  4. At least one task demonstrably FAILS with full context (noise degrades model) but PASSES with ctx-rm
-  5. Context window scaling data (4K/8K/16K/32K) shows ctx-rm maintains quality where full mode degrades
+### Phase 4: Evidence Tooling
+**Goal**: Analysis functions and CLI that evaluate experiment results against EVID criteria
 **Plans**: 2 plans
 
 Plans:
-- [ ] 04-01-PLAN.md -- Eviction source telemetry, experiment YAML configs (EVID-01/02/03), results analyzer module [wave 1]
-- [ ] 04-02-PLAN.md -- Scaling and noise degradation configs (EVID-04/05), analyzer extensions, ctx-rm analyze CLI [wave 2, depends on 04-01]
+- [x] 04-01: Evidence analyzer functions (6 analysis types)
+- [x] 04-02: `ctx-rm analyze` CLI with Rich evidence tables
+
+</details>
+
+### v1.1 Experimental Validation (In Progress)
+
+**Milestone Goal:** Run all experiments against llama-server, analyze results, and produce a findings report that proves (or disproves) the ctx-rm thesis with reproducible data.
+
+#### Phase 5: Experiment Runs
+**Goal**: All 5 experiment suites complete with CSV results in results/experiments/
+**Depends on**: Phase 4
+**Requirements**: RUN-01, RUN-02, RUN-03, RUN-04, RUN-05
+**Success Criteria** (what must be TRUE):
+  1. `results/experiments/eviction-accuracy/` contains 3-run CSV data for BudgetAware vs LRU across SCALE-001/002/003
+  2. `results/experiments/recall-effectiveness-on/` and `recall-effectiveness-off/` contain 3-run CSV data for recall on vs off on SCALE-003
+  3. `results/experiments/budget-sensitivity/` contains 3-run CSV data for 9 budget levels (500-100K) on SPEC-001
+  4. `results/experiments/noise-degradation/` contains 5-run CSV data for 7 tasks in full vs ctx-rm mode
+  5. `results/experiments/context-window-scaling/` contains 3-run CSV data for 4 budget levels across SCALE tasks
+**Plans**: 2 plans
+
+Plans:
+- [ ] 05-01-PLAN.md -- Run eviction accuracy and recall effectiveness experiments (30 combos: RUN-01, RUN-02)
+- [ ] 05-02-PLAN.md -- Run budget sensitivity, noise degradation, and context window scaling experiments (145 combos: RUN-03, RUN-04, RUN-05)
+
+#### Phase 6: Analysis and Findings
+**Goal**: All experiment data analyzed, EVID criteria evaluated, and FINDINGS.md produced with thesis verdict
+**Depends on**: Phase 5
+**Requirements**: RPT-01, RPT-02, RPT-03
+**Success Criteria** (what must be TRUE):
+  1. `ctx-rm analyze` has been run on every results directory and produces per-EVID verdicts
+  2. FINDINGS.md exists with data tables, pass/fail verdict for each of 5 EVID criteria, and overall thesis conclusion
+  3. At least 3 of 5 EVID criteria show PASS with supporting numerical evidence
+**Plans**: TBD
+
+Plans:
+- [ ] 06-01: Analyze all experiment results and produce FINDINGS.md
 
 ## Progress
 
-**Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4
+**Execution Order:** 5 -> 6
 
-| Phase | Plans Complete | Status | Completed |
-|-------|----------------|--------|-----------|
-| 1. Agent Hardening | 2/2 | ✓ Complete | 2026-02-08 |
-| 2. Scenarios & Accuracy | 3/3 | ✓ Complete | 2026-02-08 |
-| 3. Experiment Framework | 1/1 | ✓ Complete | 2026-02-08 |
-| 4. Evidence | 0/2 | Not started | - |
+| Phase | Milestone | Plans Complete | Status | Completed |
+|-------|-----------|----------------|--------|-----------|
+| 1. Agent Hardening | v1.0 | 2/2 | Complete | 2026-02-08 |
+| 2. Scenarios and Accuracy | v1.0 | 3/3 | Complete | 2026-02-08 |
+| 3. Experiment Framework | v1.0 | 1/1 | Complete | 2026-02-08 |
+| 4. Evidence Tooling | v1.0 | 2/2 | Complete | 2026-02-08 |
+| 5. Experiment Runs | v1.1 | 0/2 | Not started | - |
+| 6. Analysis and Findings | v1.1 | 0/1 | Not started | - |
