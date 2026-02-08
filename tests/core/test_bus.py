@@ -2,12 +2,29 @@
 
 from ctx_rm.core.bus import ContextBus
 from ctx_rm.core.graveyard import TieredStore
+from ctx_rm.core.policies.base import EvictionPolicy
 from ctx_rm.core.policies.lru import LRUPolicy
 from ctx_rm.core.segment import Segment, SegmentRole, Tier
 
 
 def _make_seg(content: str = "test", tokens: int = 100, role: str = "user") -> Segment:
     return Segment(content=content, role=SegmentRole(role), token_count=tokens)
+
+
+class RecordingPolicy(EvictionPolicy):
+    """Policy test double that records requested eviction token targets."""
+
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    @property
+    def name(self) -> str:
+        return "recording"
+
+    def select_evictions(self, candidates: list[Segment], tokens_to_free: int) -> list[Segment]:
+        self.calls.append(tokens_to_free)
+        ranked = sorted(candidates, key=lambda s: s.created_at)
+        return self._fill_to_budget(ranked, tokens_to_free)
 
 
 def test_ingest_adds_to_active():
@@ -251,3 +268,67 @@ def test_recall_by_search_restores_to_active():
     assert recalled.seg_id == needle_id
     assert recalled.seg_id in {s.seg_id for s in bus.active_segments}
     assert recalled.recalled_at is not None
+
+
+# ── Adaptive batch eviction ─────────────────────────────────────────────
+
+
+def test_fixed_batch_mode_requests_full_token_delta():
+    store = TieredStore()
+    policy = RecordingPolicy()
+    bus = ContextBus(
+        token_budget=1000,
+        store=store,
+        policy=policy,
+        headroom_ratio=0.15,
+        eviction_batch_mode="fixed",
+    )
+
+    bus.ingest(_make_seg(content="a", tokens=300))
+    bus.ingest(_make_seg(content="b", tokens=300))
+    bus.ingest(_make_seg(content="c", tokens=300))
+
+    # active=900, target=850 -> fixed mode requests full 50-token delta once
+    assert policy.calls == [50]
+
+
+def test_adaptive_batch_mode_uses_single_evict_near_budget():
+    store = TieredStore()
+    policy = RecordingPolicy()
+    bus = ContextBus(
+        token_budget=1000,
+        store=store,
+        policy=policy,
+        headroom_ratio=0.15,
+        eviction_batch_mode="adaptive",
+        adaptive_single_evict_max_utilization=1.0,
+    )
+
+    bus.ingest(_make_seg(content="a", tokens=300))
+    bus.ingest(_make_seg(content="b", tokens=300))
+    bus.ingest(_make_seg(content="c", tokens=300))
+
+    # active=900 (90% util) -> adaptive mode should request 1 token to force
+    # one-at-a-time eviction + re-score.
+    assert policy.calls
+    assert policy.calls[0] == 1
+
+
+def test_adaptive_batch_mode_batches_when_far_over_budget():
+    store = TieredStore()
+    policy = RecordingPolicy()
+    bus = ContextBus(
+        token_budget=1000,
+        store=store,
+        policy=policy,
+        headroom_ratio=0.15,
+        eviction_batch_mode="adaptive",
+        adaptive_single_evict_max_utilization=1.0,
+    )
+
+    # active=1200, target=850 -> far over budget, adaptive mode should request
+    # full delta in a batch step.
+    bus.ingest(_make_seg(content="oversize", tokens=1200))
+
+    assert policy.calls
+    assert policy.calls[0] == 350

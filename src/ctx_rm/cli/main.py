@@ -6,7 +6,7 @@ import asyncio
 import os
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -42,13 +42,6 @@ console = Console()
 # ── Enums for validated CLI options ──────────────────────────────────────────
 
 
-class Driver(StrEnum):
-    gemini = "gemini"
-    claude = "claude"
-    mock = "mock"
-    llamacpp = "llamacpp"
-
-
 class Mode(StrEnum):
     minimal = "minimal"
     ctx_rm = "ctx-rm"
@@ -69,12 +62,17 @@ class ScorerChoice(StrEnum):
     sequential = "sequential"
 
 
+class BatchMode(StrEnum):
+    fixed = "fixed"
+    adaptive = "adaptive"
+
+
 # ── info ─────────────────────────────────────────────────────────────────────
 
 
 @app.command()
 def info() -> None:
-    """Show system status: version, drivers, policies, scorers, and tasks."""
+    """Show system status: version, policies, scorers, and tasks."""
     _quiet_logs()
     from ctx_rm import __version__
     from ctx_rm.config import CtxRmConfig
@@ -83,17 +81,13 @@ def info() -> None:
 
     # Driver availability
     async def _check() -> dict[str, bool]:
-        from ctx_rm.drivers.claude import ClaudeCodeDriver
-        from ctx_rm.drivers.gemini import GeminiCLIDriver
         from ctx_rm.drivers.llamacpp import LlamaCppDriver
 
-        gemini = await GeminiCLIDriver().check_available()
-        claude = await ClaudeCodeDriver().check_available()
         try:
             llamacpp = await LlamaCppDriver(base_url=config.llama_base_url).check_available()
         except Exception:
             llamacpp = False
-        return {"gemini": gemini, "claude": claude, "llamacpp": llamacpp}
+        return {"llamacpp": llamacpp}
 
     drivers = asyncio.run(_check())
 
@@ -200,15 +194,15 @@ def bench(
     mode: Annotated[Mode, typer.Option(
         help="Session mode.",
     )] = Mode.ctx_rm,
-    driver: Annotated[Driver, typer.Option(
-        help="Agent driver.",
-    )] = Driver.gemini,
     policy: Annotated[Policy, typer.Option(
         help="Eviction policy (ctx-rm mode only).",
     )] = Policy.budget,
     scorer: Annotated[ScorerChoice, typer.Option(
         help="Scoring strategy.",
     )] = ScorerChoice.heuristic,
+    batch_mode: Annotated[BatchMode, typer.Option(
+        help="Eviction batch mode (ctx-rm mode only).",
+    )] = BatchMode.fixed,
     budget: Annotated[int, typer.Option(
         help="Token budget for active context.",
     )] = 100_000,
@@ -218,17 +212,17 @@ def bench(
     run_index: Annotated[int, typer.Option(
         help="Run repetition index (1, 2, 3...).",
     )] = 1,
-    model: Annotated[str | None, typer.Option(
-        help="Override model name (sets CTX_RM_GEMINI_MODEL).",
-    )] = None,
     enable_recall: Annotated[bool, typer.Option(
-        help="Enable recall in AgentLoopRunner (llamacpp driver only).",
+        help="Enable recall (page-fault semantics).",
     )] = False,
     max_turns: Annotated[int, typer.Option(
-        help="Maximum agent turns for AgentLoopRunner (llamacpp driver only).",
+        help="Maximum agent turns.",
     )] = 30,
     all_tasks: Annotated[bool, typer.Option(
-        "--all", help="Run all tasks x modes x available drivers.",
+        "--all", help="Run all tasks x modes.",
+    )] = False,
+    live: Annotated[bool, typer.Option(
+        "--live", help="Show live TUI dashboard during run.",
     )] = False,
 ) -> None:
     """Run a benchmark experiment.
@@ -236,12 +230,8 @@ def bench(
     Single run:  ctx-rm bench --task CR-003 --mode ctx-rm --policy arc
     Batch run:   ctx-rm bench --all --policy budget
     """
-    # Apply scorer override to config env before runner reads it
     os.environ["CTX_RM_SCORER"] = scorer.value
-
-    # Apply model override if provided
-    if model is not None:
-        os.environ["CTX_RM_GEMINI_MODEL"] = model
+    os.environ["CTX_RM_EVICTION_BATCH_MODE"] = batch_mode.value
 
     if all_tasks:
         _run_batch(
@@ -249,33 +239,42 @@ def bench(
             budget=budget,
             output=output,
             scorer=scorer,
+            batch_mode=batch_mode,
             enable_recall=enable_recall,
             max_turns=max_turns,
         )
         return
 
-    # Single run
     console.print()
     header = Text()
     header.append("  bench ", style="bold blue")
     header.append(task, style="bold")
     header.append(f"  {mode.value}", style="cyan")
-    header.append(f"  {driver.value}", style="green")
+    header.append("  llamacpp", style="green")
     if mode == Mode.ctx_rm:
         header.append(f"  policy={policy.value}", style="yellow")
         header.append(f"  scorer={scorer.value}", style="magenta")
-        if driver == Driver.llamacpp:
-            header.append(f"  recall={enable_recall}", style="magenta")
+        header.append(f"  batch={batch_mode.value}", style="magenta")
+        header.append(f"  recall={enable_recall}", style="magenta")
     header.append(f"  budget={budget:,}", style="dim")
     header.append(f"  run={run_index}", style="dim")
     console.print(header)
     console.print()
 
-    if driver == Driver.llamacpp:
-        from ctx_rm.benchmarks.runner import AgentLoopRunner
+    from ctx_rm.benchmarks.runner import BenchmarkRunner
 
-        runner = AgentLoopRunner(
-            driver_name=driver.value,
+    # Set up live TUI if requested
+    tui = None
+    if live:
+        from ctx_rm.cli.tui import TuiDashboard
+
+        tui = TuiDashboard(task_id=task, mode=mode.value, budget=budget)
+        tui.set_max_turns(max_turns)
+        tui.start()
+
+    try:
+        runner = BenchmarkRunner(
+            driver_name="llamacpp",
             task_id=task,
             mode=mode.value,
             token_budget=budget,
@@ -284,33 +283,41 @@ def bench(
             run_index=run_index,
             max_turns=max_turns,
             enable_recall=enable_recall,
+            on_bus_event=tui.on_bus_event if tui else None,
+            on_loop_event=tui.on_loop_event if tui else None,
         )
-    else:
-        from ctx_rm.benchmarks.runner import BenchmarkRunner
+        asyncio.run(runner.run())
+    finally:
+        if tui is not None:
+            tui.stop()
 
-        runner = BenchmarkRunner(
-            driver_name=driver.value,
-            task_id=task,
-            mode=mode.value,
-            token_budget=budget,
-            policy_name=policy.value,
-            output_dir=output,
-            run_index=run_index,
-        )
-    asyncio.run(runner.run())
-
-    # Compute result_dir matching runner's path construction
+    # Show post-run summary
     if mode == Mode.ctx_rm:
-        result_dir = output / task / "ctx-rm" / driver.value / policy.value / f"run-{run_index}"
+        result_dir = output / task / "ctx-rm" / "llamacpp" / policy.value / f"run-{run_index}"
     else:
-        result_dir = output / task / mode.value / driver.value / f"run-{run_index}"
+        result_dir = output / task / mode.value / "llamacpp" / f"run-{run_index}"
+
     if (result_dir / "evaluation.json").exists():
         import orjson
 
+        from ctx_rm.cli.tui import print_post_run_summary
+
         eval_data = orjson.loads((result_dir / "evaluation.json").read_bytes())
-        passed = eval_data.get("all_passed", False)
-        status = "[bold green]PASS[/bold green]" if passed else "[bold red]FAIL[/bold red]"
-        console.print(f"  Result: {status}  {eval_data.get('summary', '')}")
+        agent_result = eval_data.get("agent_result", {})
+        print_post_run_summary(
+            console=console,
+            task_id=task,
+            mode=mode.value,
+            passed=eval_data.get("all_passed"),
+            checks_summary=eval_data.get("summary", "--"),
+            prompt_tokens=agent_result.get("prompt_tokens", 0),
+            completion_tokens=agent_result.get("completion_tokens", 0),
+            turns=agent_result.get("turns", 0),
+            evictions=agent_result.get("segments_evicted", 0),
+            recalls=agent_result.get("recalls_made", 0),
+            active_tokens=0,
+            budget=budget,
+        )
     console.print(f"  Output: [dim]{result_dir}[/dim]\n")
 
 
@@ -319,84 +326,53 @@ def _run_batch(
     budget: int,
     output: Path,
     scorer: ScorerChoice,
+    batch_mode: BatchMode,
     enable_recall: bool,
     max_turns: int,
 ) -> None:
-    """Batch mode: all tasks x 3 modes x available drivers."""
+    """Batch mode: all tasks x 3 modes."""
     from ctx_rm.benchmarks.loader import TaskLoader
-    from ctx_rm.benchmarks.runner import AgentLoopRunner, BenchmarkRunner
-    from ctx_rm.drivers.claude import ClaudeCodeDriver
-    from ctx_rm.drivers.gemini import GeminiCLIDriver
-    from ctx_rm.drivers.llamacpp import LlamaCppDriver
+    from ctx_rm.benchmarks.runner import BenchmarkRunner
 
     loader = TaskLoader(Path("docs/context_removal_benchmark_tasks.yaml"))
     task_ids = loader.list_task_ids()
 
-    # Detect available drivers
-    available_drivers: list[str] = []
-    for name, cls in [
-        ("gemini", GeminiCLIDriver),
-        ("claude", ClaudeCodeDriver),
-        ("llamacpp", LlamaCppDriver),
-    ]:
-        loop = asyncio.new_event_loop()
-        try:
-            if loop.run_until_complete(cls().check_available()):
-                available_drivers.append(name)
-        finally:
-            loop.close()
-
-    if not available_drivers:
-        console.print(
-            "\n  [bold red]No drivers available.[/bold red]"
-            "  Install gemini or claude CLI, or start llama-server.\n"
-        )
-        return
-
     modes = ["minimal", "ctx-rm", "full"]
-    total = len(task_ids) * len(modes) * len(available_drivers)
+    total = len(task_ids) * len(modes)
 
     console.print()
     console.print(
         f"  [bold]Batch:[/bold] {len(task_ids)} tasks x {len(modes)} modes "
-        f"x {len(available_drivers)} drivers = [bold]{total}[/bold] runs"
+        f"= [bold]{total}[/bold] runs"
     )
-    console.print(f"  [dim]policy={policy.value}  scorer={scorer.value}  budget={budget:,}[/dim]")
+    console.print(
+        f"  [dim]policy={policy.value}  scorer={scorer.value}  "
+        f"batch={batch_mode.value}  budget={budget:,}[/dim]"
+    )
     console.print()
 
     completed = 0
     failed = 0
     for tid in task_ids:
         for m in modes:
-            for d in available_drivers:
-                completed += 1
-                label = f"  [{completed}/{total}]  {tid}  {m}  {d}"
-                try:
-                    if d == "llamacpp":
-                        runner = AgentLoopRunner(
-                            driver_name=d,
-                            task_id=tid,
-                            mode=m,
-                            token_budget=budget,
-                            policy_name=policy.value,
-                            output_dir=output,
-                            max_turns=max_turns,
-                            enable_recall=enable_recall,
-                        )
-                    else:
-                        runner = BenchmarkRunner(
-                            driver_name=d,
-                            task_id=tid,
-                            mode=m,
-                            token_budget=budget,
-                            policy_name=policy.value,
-                            output_dir=output,
-                        )
-                    asyncio.run(runner.run())
-                    console.print(f"{label}  [green]done[/green]")
-                except Exception as e:
-                    failed += 1
-                    console.print(f"{label}  [red]error:[/red] {e}")
+            completed += 1
+            label = f"  [{completed}/{total}]  {tid}  {m}  llamacpp"
+            try:
+                runner = BenchmarkRunner(
+                    driver_name="llamacpp",
+                    task_id=tid,
+                    mode=m,
+                    token_budget=budget,
+                    policy_name=policy.value,
+                    output_dir=output,
+                    max_turns=max_turns,
+                    enable_recall=enable_recall,
+                )
+                asyncio.run(runner.run())
+                console.print(f"{label}  [green]done[/green]")
+            except Exception as e:
+                failed += 1
+                console.print(f"{label}  [red]error:[/red] {e}")
 
     console.print()
     status_style = "bold green" if failed == 0 else "bold yellow"
@@ -417,7 +393,6 @@ _KNOWN_POLICIES = frozenset(p.value for p in Policy)
 
 
 def _collect_runs(run_parent: Path) -> list[Path]:
-    """Return sorted list of run-N directories under *run_parent*."""
     return sorted(
         (d for d in run_parent.iterdir() if d.is_dir() and d.name.startswith("run-")),
         key=lambda p: p.name,
@@ -427,14 +402,9 @@ def _collect_runs(run_parent: Path) -> list[Path]:
 def _aggregate_runs(
     run_dirs: list[Path],
 ) -> tuple[float, float, float, int, int, str, str | None]:
-    """Aggregate metrics across run-N directories.
-
-    Returns:
-        (median_tokens_in, median_evicted, median_peak,
-         passes, total_eval_runs, best_checks_str, pass_rate_str)
-    """
-    import orjson
     from statistics import median
+
+    import orjson
 
     tokens_in_list: list[float] = []
     evicted_list: list[float] = []
@@ -477,7 +447,6 @@ def _aggregate_runs(
 def _read_single(
     driver_dir: Path,
 ) -> tuple[float, float, float, int, int, str, str | None] | None:
-    """Read legacy single-run result (metrics.json directly in driver_dir)."""
     import orjson
 
     mp = driver_dir / "metrics.json"
@@ -519,8 +488,6 @@ def _format_row(
     num_runs: int,
     total_runs: int,
 ) -> None:
-    """Add a formatted row to the compare table."""
-    # Color eviction column
     evict_style = ""
     if mode_name == "ctx-rm" and med_ev > 0:
         evict_style = "cyan"
@@ -530,7 +497,6 @@ def _format_row(
         else f"{int(med_ev):,}"
     )
 
-    # Color peak utilization
     if med_pk > 0.9:
         peak_display = f"[red]{med_pk:.0%}[/red]"
     elif med_pk > 0.7:
@@ -538,7 +504,6 @@ def _format_row(
     else:
         peak_display = f"{med_pk:.0%}"
 
-    # Pass rate display
     if pass_rate is None:
         rate_display = "[dim]--[/dim]"
     else:
@@ -573,13 +538,7 @@ def compare(
         help="Directory containing benchmark results.",
     )] = Path("./results"),
 ) -> None:
-    """Compare benchmark results across modes, drivers, and policies.
-
-    Reads nested results/{task}/{mode}/{driver}/ directories and generates
-    a summary table with token usage, eviction stats, and pass/fail status.
-    Supports multi-run (run-N) directories with median aggregation and
-    ctx-rm policy subdirectories.
-    """
+    """Compare benchmark results across modes and policies."""
     _quiet_logs()
 
     if not results_dir.is_dir():
@@ -619,28 +578,40 @@ def compare(
                 if not driver_dir.is_dir():
                     continue
 
-                # Detect structure: policy subdirs (ctx-rm), run-N dirs, or legacy flat
                 subdirs = [d for d in driver_dir.iterdir() if d.is_dir()]
                 subdir_names = {d.name for d in subdirs}
 
-                # Check for policy subdirectories (ctx-rm mode)
                 has_policy_dirs = bool(subdir_names & _KNOWN_POLICIES)
 
                 if has_policy_dirs:
-                    # ctx-rm with policy subdirs: driver/{policy}/run-N/
                     for policy_dir in sorted(subdirs):
                         if policy_dir.name not in _KNOWN_POLICIES:
                             continue
                         run_dirs = _collect_runs(policy_dir)
                         if not run_dirs:
-                            # Legacy: policy dir contains metrics.json directly
                             result = _read_single(policy_dir)
                             if result is None:
                                 continue
-                            med_in, med_ev, med_pk, passes, total_eval, checks_str, pass_rate = result
+                            (
+                                med_in,
+                                med_ev,
+                                med_pk,
+                                passes,
+                                total_eval,
+                                checks_str,
+                                pass_rate,
+                            ) = result
                             num_runs, total_runs = 1, 1
                         else:
-                            med_in, med_ev, med_pk, passes, total_eval, checks_str, pass_rate = _aggregate_runs(run_dirs)
+                            (
+                                med_in,
+                                med_ev,
+                                med_pk,
+                                passes,
+                                total_eval,
+                                checks_str,
+                                pass_rate,
+                            ) = _aggregate_runs(run_dirs)
                             if med_in == 0 and med_ev == 0 and med_pk == 0 and total_eval == 0:
                                 continue
                             num_runs, total_runs = len(run_dirs), len(run_dirs)
@@ -658,12 +629,19 @@ def compare(
                         mode_stats[mode_name]["passed"] += passes
 
                 else:
-                    # Non-policy path: check for run-N dirs or legacy flat
                     run_dirs = _collect_runs(driver_dir)
                     policy_display = "--"
 
                     if run_dirs:
-                        med_in, med_ev, med_pk, passes, total_eval, checks_str, pass_rate = _aggregate_runs(run_dirs)
+                        (
+                            med_in,
+                            med_ev,
+                            med_pk,
+                            passes,
+                            total_eval,
+                            checks_str,
+                            pass_rate,
+                        ) = _aggregate_runs(run_dirs)
                         if med_in == 0 and med_ev == 0 and med_pk == 0 and total_eval == 0:
                             continue
                         num_runs, total_runs = len(run_dirs), len(run_dirs)
@@ -671,7 +649,15 @@ def compare(
                         result = _read_single(driver_dir)
                         if result is None:
                             continue
-                        med_in, med_ev, med_pk, passes, total_eval, checks_str, pass_rate = result
+                        (
+                            med_in,
+                            med_ev,
+                            med_pk,
+                            passes,
+                            total_eval,
+                            checks_str,
+                            pass_rate,
+                        ) = result
                         num_runs, total_runs = 1, 1
 
                     _format_row(
@@ -693,7 +679,6 @@ def compare(
     console.print()
     console.print(table)
 
-    # Mode summary
     if mode_stats:
         console.print()
         summary = Text("  ")
@@ -711,3 +696,4 @@ def compare(
             summary.append("  ", style="dim")
         console.print(summary)
     console.print()
+

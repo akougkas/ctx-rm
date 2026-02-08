@@ -4,8 +4,8 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-128%20passing-brightgreen.svg)]()
-[![v1.0](https://img.shields.io/badge/version-1.0-orange.svg)]()
+[![Tests](https://img.shields.io/badge/tests-108%20passing-brightgreen.svg)]()
+[![v0.3](https://img.shields.io/badge/version-0.3--dev-orange.svg)]()
 
 ---
 
@@ -68,11 +68,15 @@ Ingest → Active → Warm → Cold → Graveyard
 
 1. **Ingest**: New content enters Active. The ContextBus assigns a turn number, checks admission control (large tool outputs may bypass Active and go directly to Warm), and notifies the eviction policy via `on_ingest()`.
 
-2. **Score**: The Scorer evaluates each segment's value. The HeuristicScorer combines three signals — recency (exponential decay), frequency (log-scaled access count), and role weight (system > user > assistant > tool). The optional OllamaScorer calls a local LLM for semantic relevance scoring.
+2. **Score**: The Scorer evaluates each segment's value. Two scorers are available:
+   - **HeuristicScorer**: Combines recency (exponential decay), frequency (log-scaled access count), role weight, and source weight. Fast, no external dependencies.
+   - **SequentialScorer**: Task-conditioned marginal value scoring — evaluates each segment's importance relative to the retained set AND the current task goal. Falls back to HeuristicScorer on failure. Supports pluggable LLM backends (Ollama, generic HTTP) or a built-in lexical backend.
 
-3. **Evict**: When the active context exceeds the token budget (minus a configurable headroom), the eviction policy selects segments to remove. The evicted segment moves to Warm (in-memory LRU cache), then to Cold (SQLite with optional embedding vectors), then to Graveyard (append-only archive).
+3. **Evict**: When the active context exceeds the token budget (minus a configurable headroom), the eviction policy selects segments to remove. Supports fixed batch eviction or adaptive mode (one-at-a-time near budget, batch when far over). Evicted segments move to Warm → Cold → Graveyard.
 
-4. **Recall**: When the agent needs evicted content, a search against Cold/Graveyard returns matching segments. They enter as Zombies (staging tier for validation), then promote back to Active. This is a page fault.
+4. **Recall**: When the agent needs evicted content, a search against Warm+Cold returns matching segments. They promote back to Active via the Zombie staging tier. Source filtering ensures only safe sources are recalled (needle, context, user_task, user_message) — never assistant/tool pairs (pair integrity).
+
+5. **Adapt**: The `FeedbackTracker` records eviction/recall/eval events. `AdaptiveWeights` uses this feedback to shift scoring behavior: high recall rate → conservative (boost source weights, increase headroom), zero recall rate → aggressive (decay weights, shrink headroom). This mirrors ARC's adaptive `p` parameter generalized across the full pipeline.
 
 ### Admission Control
 
@@ -83,46 +87,49 @@ Not all content deserves Active tier placement. Segments from `file_read` and `t
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Benchmark Harness                     │
-│   BenchmarkRunner → TaskLoader → TurnExecutor           │
-│   → Evaluator (file_contains, file_equals, ...)         │
-└────────────┬──────────────────────────────┬──────────────┘
-             │                              │
-    ┌────────▼────────┐            ┌────────▼────────┐
-    │  Gemini CLI      │            │  Claude Code     │
-    │  gemini -p ...   │            │  claude -p ...   │
-    └────────▲────────┘            └────────▲────────┘
-             │                              │
-             └──────────────┬───────────────┘
-                            │
-                   ┌────────▼────────┐
-                   │   ContextBus     │  ← Central coordinator
-                   │   (token budget, │     Ingestion, scoring,
-                   │    admission     │     eviction, recall
-                   │    control)      │
-                   └──┬────┬────┬────┘
-                      │    │    │
-             ┌────────┘    │    └────────┐
-             ▼             ▼             ▼
-       ┌──────────┐  ┌──────────┐  ┌──────────┐
-       │  Scorer   │  │ Evictor  │  │ Watcher  │
-       │ Heuristic │  │ LRU/     │  │ Async    │
-       │ or Ollama │  │ CLOCK/   │  │ background│
-       │ (LLM)    │  │ Budget/  │  │ eviction  │
-       │          │  │ ARC/     │  │ loop      │
-       │          │  │ InnoDB   │  │           │
-       └──────────┘  └────┬─────┘  └──────────┘
-                          │
-               ┌──────────▼──────────┐
-               │   Tiered Store       │
-               │                      │
-               │ Active ──▶ Warm      │  (in-memory LRU cache)
-               │ Warm   ──▶ Cold      │  (SQLite + embeddings)
-               │ Cold   ──▶ Graveyard │  (archived, immutable)
-               │                      │
-               │ Cold/GY ──▶ Zombie ──▶ Active  (recall)
-               └──────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    Benchmark Harness                              │
+│   BenchmarkRunner → TaskLoader → Evaluator                       │
+│   test_harness.py (YAML-configurable tests + A/B experiments)    │
+└──────────────────────────────┬────────────────────────────────────┘
+                               │
+                     ┌─────────▼──────────┐
+                     │     AgentLoop       │
+                     │ (autonomous agent)  │
+                     │  tools + ContextBus │
+                     └─────────┬───────────┘
+                               │
+               ┌───────────────▼──────────────────────────┐
+               │   LlamaCpp Driver (HTTP)                   │
+               │   /v1/chat/completions, retry, JSON recov. │
+               │   context window discovery                 │
+               └───────────────┬──────────────────────────┘
+       │
+┌──────▼──────────────────────────────────────────────┐
+│   ContextBus  ← Central coordinator                  │
+│   ingest, score, evict, recall, admission control    │
+│   feedback tracking, adaptive weight refresh         │
+└──┬────────┬────────┬──────────┬────────┬────────────┘
+   │        │        │          │        │
+   ▼        ▼        ▼          ▼        ▼
+┌───────┐┌───────┐┌───────┐┌────────┐┌──────────┐
+│Scorer ││Policy ││Watcher││Feedback││ Adaptive │
+│Heuris.││LRU/   ││Async  ││Tracker ││ Weights  │
+│Sequen.││CLOCK/ ││bg     ││events  ││ source/  │
+│Ollama ││Budget/││evict  ││recall  ││ policy   │
+│       ││ARC/   ││loop   ││eval    ││ params   │
+│       ││InnoDB ││       ││churn   ││          │
+└───────┘└──┬────┘└───────┘└────────┘└──────────┘
+            │
+ ┌──────────▼──────────┐
+ │   Tiered Store       │
+ │                      │
+ │ Active ──▶ Warm      │  (in-memory LRU cache)
+ │ Warm   ──▶ Cold      │  (SQLite + embeddings)
+ │ Cold   ──▶ Graveyard │  (archived, immutable)
+ │                      │
+ │ Warm/Cold ──▶ Zombie ──▶ Active  (recall)
+ └──────────────────────┘
 ```
 
 ### Tier System
@@ -144,9 +151,7 @@ See [docs/tiered_graveyard.md](docs/tiered_graveyard.md) for the full theoretica
 ### Prerequisites
 
 - **Python 3.12+** with [uv](https://docs.astral.sh/uv/)
-- **At least one agent driver:**
-  - [Gemini CLI](https://github.com/google-gemini/gemini-cli): `npm install -g @google/gemini-cli` (free tier works)
-  - [Claude Code](https://docs.anthropic.com/en/docs/claude-code): `npm install -g @anthropic-ai/claude-code` (Max subscription)
+- **llama-server** running locally or on the network (Nemotron-3-Nano-30B recommended)
 - **Optional:** [Ollama](https://ollama.ai/) for LLM-based scoring (any model works — auto-discovered)
 
 ### Install
@@ -163,20 +168,20 @@ uv sync --all-extras
 # Check system status, available drivers, policies, and tasks
 uv run ctx-rm info
 
-# List all 10 benchmark tasks
+# List all 13 benchmark tasks
 uv run ctx-rm tasks
 ```
 
 ### Run Your First Benchmark
 
 ```bash
-# Single task, single mode — uses Gemini CLI by default
+# Single task — ctx-rm mode with BudgetAware policy
 uv run ctx-rm bench --task CR-001 --mode ctx-rm --policy budget
 
-# Same task with full context (baseline for comparison)
+# Full context baseline (no eviction)
 uv run ctx-rm bench --task CR-001 --mode full
 
-# Same task with minimal context (lower bound)
+# Minimal context baseline (no history)
 uv run ctx-rm bench --task CR-001 --mode minimal
 
 # Compare results across all runs
@@ -186,7 +191,7 @@ uv run ctx-rm compare ./results
 ### Run All Benchmarks
 
 ```bash
-# All 10 tasks × 3 modes × available drivers
+# All 13 tasks × 3 modes
 uv run ctx-rm bench --all
 
 # With a specific policy
@@ -206,7 +211,7 @@ Displays system status: version, available drivers, policies, scorers, embedding
 
 ### `ctx-rm tasks`
 
-Lists all 10 benchmark tasks with their ID, title, eviction pressure type, turn count, needle count, and evaluation check count.
+Lists all 13 benchmark tasks with their ID, title, eviction pressure type, turn count, needle count, and evaluation check count.
 
 ### `ctx-rm bench`
 
@@ -214,32 +219,36 @@ Runs benchmark experiments. Supports single-task or batch-all modes.
 
 | Option | Values | Default | Description |
 |--------|--------|---------|-------------|
-| `--task` | `CR-001` through `CR-010` | `CR-001` | Task ID to run |
+| `--task` | `CR-001` through `SPEC-001` | `CR-001` | Task ID to run |
 | `--mode` | `minimal`, `ctx-rm`, `full` | `ctx-rm` | Session mode |
-| `--driver` | `gemini`, `claude` | `gemini` | Agent CLI to drive |
 | `--policy` | `lru`, `clock`, `budget`, `arc`, `innodb` | `budget` | Eviction policy (ctx-rm mode only) |
-| `--scorer` | `heuristic`, `ollama` | `heuristic` | Scoring strategy |
+| `--scorer` | `heuristic`, `ollama`, `sequential` | `heuristic` | Scoring strategy |
 | `--budget` | integer | `100000` | Token budget for active context |
+| `--batch-mode` | `fixed`, `adaptive` | `fixed` | Eviction batch mode |
+| `--max-turns` | integer | `30` | Max agent turns |
+| `--enable-recall` | flag | — | Enable page-fault recall from warm/cold |
+| `--live` | flag | — | Show live TUI dashboard during run |
 | `--output` | path | `results` | Output directory |
-| `--all` | flag | — | Run all tasks × modes × available drivers |
+| `--all` | flag | — | Run all tasks × 3 modes |
 
 **Output structure:**
 ```
 results/
 ├── CR-001/
 │   ├── minimal/
-│   │   └── gemini/
-│   │       ├── metrics.json        # Token usage, eviction stats
-│   │       ├── evaluation.json     # Pass/fail for each check
-│   │       └── response_log.jsonl  # Full agent responses per turn
+│   │   └── llamacpp/
+│   │       └── run-1/
+│   │           ├── metrics.json        # Token usage, eviction stats
+│   │           └── evaluation.json     # Pass/fail for each check
 │   ├── ctx-rm/
-│   │   └── gemini/
-│   │       └── ...
+│   │   └── llamacpp/
+│   │       └── budget/
+│   │           └── run-1/
+│   │               └── ...
 │   └── full/
-│       └── gemini/
-│           └── ...
-├── CR-002/
-│   └── ...
+│       └── llamacpp/
+│           └── run-1/
+│               └── ...
 ```
 
 ### `ctx-rm compare`
@@ -281,14 +290,6 @@ All settings are configurable via environment variables with the `CTX_RM_` prefi
 | `db_path` | `CTX_RM_DB_PATH` | `:memory:` | SQLite path for ColdStore (`:memory:` for in-memory) |
 | `warm_max_items` | `CTX_RM_WARM_MAX_ITEMS` | `64` | Max segments in warm cache |
 | `warm_max_tokens` | `CTX_RM_WARM_MAX_TOKENS` | `50000` | Max tokens in warm cache |
-
-### Driver Settings
-
-| Setting | Env Var | Default | Description |
-|---------|---------|---------|-------------|
-| `default_driver` | `CTX_RM_DEFAULT_DRIVER` | `gemini` | Default agent CLI |
-| `gemini_model` | `CTX_RM_GEMINI_MODEL` | `gemini-2.5-pro` | Gemini model |
-| `claude_model` | `CTX_RM_CLAUDE_MODEL` | `sonnet` | Claude model |
 
 ### Watcher Settings
 
@@ -382,7 +383,7 @@ The benchmark system evaluates whether intelligent context removal can match ful
 
 ### Task Design
 
-Each of the 10 benchmark tasks (CR-001 through CR-010) is a 20-turn multi-turn coding scenario designed to test different eviction pressure patterns:
+13 benchmark tasks test different eviction pressure patterns:
 
 | Task | Title | Pressure Pattern |
 |------|-------|-----------------|
@@ -396,6 +397,9 @@ Each of the 10 benchmark tasks (CR-001 through CR-010) is a 20-turn multi-turn c
 | CR-008 | Refactor Outdated Comments | Gradual buildup |
 | CR-009 | Test Harness Clue | Interleaved noise |
 | CR-010 | Multi Issue Thread | Sudden injection |
+| MULTI-001 | Cross-file Constraint | Sudden injection |
+| TRACE-001 | Bug Hunt in Log Noise | Sudden injection |
+| SPEC-001 | Config Synthesis from Spec | Sudden injection |
 
 Each task contains:
 - **Needles**: Critical facts/code injected at specific turns that must be retained
@@ -439,6 +443,10 @@ ctx-rm/
 │   │   ├── bus.py                           # ContextBus — central coordinator (ingest/score/evict/recall)
 │   │   ├── graveyard.py                     # TieredStore — WarmCache, ColdStore (SQLite), ZombieQueue
 │   │   ├── scorer.py                        # Scorer ABC, HeuristicScorer (recency + frequency + role)
+│   │   ├── scorer_sequential.py             # SequentialScorer — task-aware conditional scoring
+│   │   ├── adaptive.py                      # AdaptiveWeights — feedback-driven scoring adaptation
+│   │   ├── feedback.py                      # FeedbackTracker — eviction/recall/eval event log
+│   │   ├── tokenizer.py                     # tiktoken cl100k_base with char/4 fallback
 │   │   ├── embedding.py                     # EmbeddingProvider ABC, HashingEmbeddingProvider, cosine_similarity_batch
 │   │   └── policies/                        # Eviction policy implementations
 │   │       ├── base.py                      # EvictionPolicy ABC (select_evictions + lifecycle hooks)
@@ -451,10 +459,12 @@ ctx-rm/
 │   ├── watch/
 │   │   └── watcher.py                       # Async background eviction (interval/threshold/per-turn/hybrid)
 │   │
-│   ├── drivers/                             # CLI agent drivers
-│   │   ├── base.py                          # AgentDriver ABC
-│   │   ├── gemini.py                        # Gemini CLI subprocess driver (gemini -p --output-format json)
-│   │   └── claude.py                        # Claude Code subprocess driver (claude -p --output-format json)
+│   ├── agents/                              # Autonomous agent loop
+│   │   ├── loop.py                          # AgentLoop — driver + tools + ContextBus + pair integrity
+│   │   └── tools.py                         # 6 sandboxed tools (read_file, write_file, list_dir, etc.)
+│   │
+│   ├── drivers/                             # Agent drivers
+│   │   └── llamacpp.py                      # HTTP driver for llama-server (retry, JSON recovery)
 │   │
 │   ├── benchmarks/                          # Benchmark harness
 │   │   ├── models.py                        # BenchmarkSuite, Task, Needle, EvalCheck (Pydantic v2)
@@ -462,34 +472,26 @@ ctx-rm/
 │   │   ├── executor.py                      # TurnExecutor — builds multi-turn sequences with needle/noise
 │   │   ├── fixtures.py                      # FixtureManager — copy fixture dirs to temp for isolation
 │   │   ├── evaluator.py                     # Evaluator — runs file assertions (4 types)
-│   │   └── runner.py                        # BenchmarkRunner — orchestrates full pipeline
+│   │   └── runner.py                        # BenchmarkRunner (3 modes, AgentLoop-based)
 │   │
 │   ├── integrations/                        # Optional integrations
 │   │   ├── sentence_transformers.py         # SentenceTransformerProvider (optional dep)
-│   │   └── ollama_scorer.py                 # OllamaScorer — LLM scoring via local Ollama
+│   │   ├── ollama_scorer.py                 # OllamaScorer — LLM scoring via local Ollama
+│   │   └── llm_scoring_backend.py           # Pluggable LLM scoring helpers for SequentialScorer
 │   │
 │   ├── telemetry/
 │   │   └── metrics.py                       # MetricsCollector — per-turn snapshots, JSON export
 │   │
 │   └── cli/
-│       └── main.py                          # Typer CLI — info, tasks, bench, compare commands
+│       ├── main.py                          # Typer CLI — info, tasks, bench, compare commands
+│       └── tui.py                           # Live TUI dashboard + post-run Rich summary
 │
-├── tests/                                   # 128 tests
-│   ├── core/
-│   │   ├── test_segment.py                  # Segment model, tier transitions
-│   │   ├── test_bus.py                      # ContextBus integration, admission control
-│   │   ├── test_graveyard.py                # TieredStore, ColdStore embedding search
-│   │   ├── test_policies.py                 # All 5 eviction policies
-│   │   └── test_embedding.py                # EmbeddingProvider, cosine similarity
-│   ├── benchmarks/
-│   │   ├── test_loader.py                   # YAML loading, task lookup
-│   │   ├── test_executor.py                 # Turn building, needle/noise injection
-│   │   ├── test_evaluator.py                # 4 assertion types
-│   │   ├── test_fixtures.py                 # Fixture copy, isolation, cleanup
-│   │   ├── test_runner.py                   # BenchmarkRunner with mocked driver
-│   │   └── test_cli.py                      # CLI bench/compare commands
-│   └── integrations/
-│       └── test_ollama_scorer.py            # OllamaScorer (15 mocked tests)
+├── tests/                                   # 108 tests across 6 files
+│   ├── core/                                # Bus, graveyard, sequential scorer
+│   ├── agents/                              # AgentLoop, recall, pair integrity
+│   ├── integration/                         # End-to-end pipeline tests (17 tests)
+│   ├── test_harness.py                      # Consolidated harness (YAML-configurable)
+│   └── configs/                             # YAML test configurations
 │
 ├── benchmarks/
 │   └── fixtures/                            # 10 mini-repo fixtures (one per task)
@@ -609,27 +611,6 @@ class MyEmbeddingProvider(EmbeddingProvider):
 
 ColdStore uses `cosine_similarity_batch()` (dot product on L2-normalized vectors) for search — ensure your provider returns normalized vectors.
 
-### Adding a New Agent Driver
-
-1. Implement the `AgentDriver` ABC in `src/ctx_rm/drivers/`:
-
-```python
-from ctx_rm.drivers.base import AgentDriver
-
-
-class MyDriver(AgentDriver):
-    async def send(self, prompt: str, working_dir: str) -> str:
-        # Send prompt to agent CLI, return response
-        ...
-
-    async def is_available(self) -> bool:
-        # Check if the CLI tool is installed
-        ...
-```
-
-2. Register it in `_create_driver()` in `src/ctx_rm/benchmarks/runner.py`
-3. Add it to the `DriverName` StrEnum in `src/ctx_rm/cli/main.py`
-
 ### Running Tests
 
 ```bash
@@ -637,11 +618,27 @@ class MyDriver(AgentDriver):
 uv run pytest
 
 # Specific subsystem
-uv run pytest tests/core/test_policies.py -v
+uv run pytest tests/core/test_bus.py -v
 
 # With coverage
 uv run pytest --cov=ctx_rm --cov-report=term-missing
 ```
+
+---
+
+## Early Results
+
+First benchmark results using Nemotron-3-Nano-30B via llama-server:
+
+| Task | Mode | Result | Prompt Tokens | Turns | Evictions |
+|------|------|--------|--------------|-------|-----------|
+| SPEC-001 | **ctx-rm** | **PASS 2/2** | **7,151** | 6 | 1 |
+| SPEC-001 | full | PASS 2/2 | 16,707 | 7 | 0 |
+| SPEC-001 | minimal | PASS 2/2 | 11,586 | 9 | 0 |
+
+ctx-rm passed with **57% fewer prompt tokens** than full mode and finished in fewer turns. The eviction engine stripped noise, kept the needle, and the agent completed faster with cleaner context.
+
+These are early single-run results on a small local model — statistical validation across multiple runs and tasks is the next milestone.
 
 ---
 
@@ -701,7 +698,7 @@ See [docs/landscape.md](docs/landscape.md) for the full bibliography including L
 
 | Decision | Rationale |
 |----------|-----------|
-| **CLI-first, not SDK** | Drives Gemini CLI and Claude Code in headless mode. Uses existing subscriptions — zero API costs for agent execution |
+| **Own agent, not CLI wrapper** | AgentLoop drives llama-server via HTTP. Full control over every message and tool call |
 | **Background, not inline** | The Watcher runs as an async task. The agent is never interrupted or aware of eviction |
 | **Removal, not compression** | Segments are evicted whole (recoverable), not summarized (lossy). The Graveyard preserves exact content |
 | **Separation of concerns** | Scorer/Evictor is a separate process from the task agent — two different "brains" |

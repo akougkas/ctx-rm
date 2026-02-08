@@ -1,0 +1,24 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.3
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+        files: ^src/
+      - id: ruff-format
+        files: ^src/
+
+  - repo: local
+    hooks:
+      - id: mypy-src
+        name: mypy (core paths)
+        entry: >-
+          uv run mypy --config-file=/dev/null --follow-imports=skip --ignore-missing-imports
+          src/ctx_rm/config.py
+          src/ctx_rm/core/bus.py
+          src/ctx_rm/drivers/llamacpp.py
+          src/ctx_rm/agents/loop.py
+          src/ctx_rm/benchmarks/runner.py
+          src/ctx_rm/cli/main.py
+        language: system
+        pass_filenames: false

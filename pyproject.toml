@@ -31,13 +31,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gemini = [
-    "google-genai>=1.0",
-]
-claude = [
-    # Claude Code is installed separately via npm
-    # This group provides helpers for parsing its JSON output
-]
 bench = [
     "matplotlib>=3.10",
     "pandas>=2.2",
@@ -47,6 +40,7 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.25",
     "pytest-cov>=6.0",
+    "pre-commit>=4.0",
     "ruff>=0.9",
     "mypy>=1.14",
 ]
@@ -59,7 +53,7 @@ ollama = [
 tokenizer = [
     "tiktoken>=0.8",
 ]
-all = ["ctx-rm[gemini,bench,dev,embeddings,ollama,tokenizer]"]
+all = ["ctx-rm[bench,dev,embeddings,ollama,tokenizer]"]
 
 [project.scripts]
 ctx-rm = "ctx_rm.cli.main:app"
@@ -84,9 +78,18 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "integration: requires real llama-server on mini:8080",
+    "live: requires real llama-server for live TUI testing",
 ]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
 warn_return_any = true
+
+[tool.coverage.run]
+source = ["ctx_rm"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true

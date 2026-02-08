@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import orjson
@@ -24,6 +25,9 @@ from ctx_rm.drivers.llamacpp import ChatResponse, ToolCall
 from ctx_rm.watch.watcher import Watcher, WatcherConfig
 
 logger = structlog.get_logger()
+
+# Progress callback: receives (event_name, data_dict)
+ProgressCallback = Callable[[str, dict[str, Any]], None]
 
 
 class ChatDriver(Protocol):
@@ -69,6 +73,7 @@ class AgentLoop:
         watcher_config: WatcherConfig | None = None,
         enable_recall: bool = False,
         recall_top_k: int = 1,
+        on_progress: ProgressCallback | None = None,
     ) -> None:
         self.driver = driver
         self.bus = bus
@@ -77,9 +82,15 @@ class AgentLoop:
         self.watcher_config = watcher_config
         self.enable_recall = enable_recall
         self.recall_top_k = recall_top_k
+        self._on_progress = on_progress
         self._task_text: str = ""  # Set in run(), used as recall query
         self._recalls_made: int = 0
         self._recalled_ids: set[str] = set()  # Prevent recall thrashing
+
+    def _emit(self, event: str, data: dict[str, Any]) -> None:
+        """Fire progress callback if registered."""
+        if self._on_progress is not None:
+            self._on_progress(event, data)
 
     async def run(self, system_prompt: str, task: str) -> AgentResult:
         """Run the agent loop to completion."""
@@ -103,8 +114,25 @@ class AgentLoop:
                 self.bus.advance_turn()
                 self._try_recall()
 
+                self._emit("turn_start", {
+                    "turn": turn + 1,
+                    "active_segments": len(self.bus.active_segments),
+                    "active_tokens": self.bus.active_tokens,
+                })
+
                 messages = self._render_messages()
-                response = await self.driver.chat(messages, tools=TOOL_DEFINITIONS)
+                try:
+                    response = await self.driver.chat(messages, tools=TOOL_DEFINITIONS)
+                except Exception as e:
+                    logger.error("agent_driver_chat_failed", turn=turn + 1, error=str(e))
+                    return self._build_result(
+                        None,
+                        turn + 1,
+                        total_prompt,
+                        total_completion,
+                        tool_calls_made,
+                        watcher,
+                    )
 
                 total_prompt += response.prompt_tokens
                 total_completion += response.completion_tokens
@@ -114,13 +142,34 @@ class AgentLoop:
                     self._ingest_assistant_tool_calls(response, pair_group)
 
                     for tc in response.tool_calls:
-                        result = await self.tool_executor.execute(tc.name, tc.arguments)
+                        self._emit("tool_call", {
+                            "name": tc.name,
+                            "args_preview": str(tc.arguments)[:120],
+                        })
+                        if tc.arguments.get("_malformed_json"):
+                            raw = str(tc.arguments.get("_raw", ""))[:500]
+                            result = (
+                                "Error: malformed tool arguments JSON from model. "
+                                "Retry the tool call with a valid JSON object. "
+                                f"Raw arguments: {raw}"
+                            )
+                        else:
+                            result = await self.tool_executor.execute(tc.name, tc.arguments)
                         self._ingest_tool_result(tc, result, pair_group)
                         tool_calls_made += 1
 
                     self._cleanup_orphaned_pairs()
                 else:
                     self._ingest_assistant_text(response)
+
+                self._emit("turn_end", {
+                    "turn": turn + 1,
+                    "prompt_tokens": response.prompt_tokens,
+                    "completion_tokens": response.completion_tokens,
+                    "tool_calls": len(response.tool_calls) if response.tool_calls else 0,
+                })
+
+                if not response.tool_calls:
                     return self._build_result(
                         response.content, turn + 1,
                         total_prompt, total_completion, tool_calls_made,
@@ -176,6 +225,10 @@ class AgentLoop:
             return
 
         results = self.bus.search_evicted(self._task_text, top_k=self.recall_top_k)
+        self._emit("recall_attempt", {
+            "query": self._task_text[:120],
+            "found_count": len(results),
+        })
         for seg in results:
             # Skip already-recalled segments (prevent thrashing)
             if seg.seg_id in self._recalled_ids:
@@ -234,17 +287,30 @@ class AgentLoop:
     def _ingest_assistant_tool_calls(
         self, response: ChatResponse, pair_group: str,
     ) -> None:
-        tool_calls_data = [
-            {
+        assert response.tool_calls is not None
+        tool_calls_data = []
+        for tc in response.tool_calls:
+            try:
+                arguments = orjson.dumps(tc.arguments).decode()
+            except Exception:
+                logger.warning(
+                    "assistant_tool_args_not_json_serializable",
+                    tool_name=tc.name,
+                    tool_call_id=tc.id,
+                )
+                arguments = orjson.dumps({
+                    "_malformed_json": True,
+                    "_raw": str(tc.arguments),
+                }).decode()
+
+            tool_calls_data.append({
                 "id": tc.id,
                 "type": "function",
                 "function": {
                     "name": tc.name,
-                    "arguments": orjson.dumps(tc.arguments).decode(),
+                    "arguments": arguments,
                 },
-            }
-            for tc in response.tool_calls
-        ]
+            })
 
         msg: dict[str, Any] = {
             "role": "assistant",

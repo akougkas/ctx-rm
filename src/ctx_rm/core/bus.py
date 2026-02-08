@@ -13,19 +13,25 @@ TieredStore for tier transitions, and provides the API for:
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
 from ctx_rm.core.segment import Segment, Tier
 
 if TYPE_CHECKING:
+    from ctx_rm.core.adaptive import AdaptiveWeights
+    from ctx_rm.core.feedback import FeedbackTracker
     from ctx_rm.core.graveyard import TieredStore
     from ctx_rm.core.policies.base import EvictionPolicy
     from ctx_rm.core.scorer import Scorer
     from ctx_rm.telemetry.metrics import MetricsCollector
 
 logger = structlog.get_logger()
+
+# Event callback: receives (event_name, data_dict)
+EventCallback = Callable[[str, dict[str, Any]], None]
 
 
 class ContextBus:
@@ -44,6 +50,11 @@ class ContextBus:
         metrics: MetricsCollector | None = None,
         headroom_ratio: float = 0.15,  # Keep 15% headroom by default
         admission_threshold: int = 2000,
+        eviction_batch_mode: Literal["fixed", "adaptive"] = "fixed",
+        adaptive_single_evict_max_utilization: float = 1.0,
+        feedback: FeedbackTracker | None = None,
+        adaptive: AdaptiveWeights | None = None,
+        on_event: EventCallback | None = None,
     ) -> None:
         self.token_budget = token_budget
         self.headroom_ratio = headroom_ratio
@@ -52,6 +63,17 @@ class ContextBus:
         self.scorer = scorer
         self.metrics = metrics
         self.admission_threshold = admission_threshold
+        self.eviction_batch_mode = eviction_batch_mode
+        self.adaptive_single_evict_max_utilization = adaptive_single_evict_max_utilization
+        self.feedback = feedback
+        self.adaptive = adaptive
+        self._on_event = on_event
+
+        if self.eviction_batch_mode not in {"fixed", "adaptive"}:
+            raise ValueError("eviction_batch_mode must be 'fixed' or 'adaptive'")
+
+        # Track segments that have been recalled so we can detect churn.
+        self._recalled_ids: set[str] = set()
 
         # Active context — ordered by insertion (used for rendering to LLM)
         self._active: OrderedDict[str, Segment] = OrderedDict()
@@ -59,6 +81,11 @@ class ContextBus:
 
         # Turn counter
         self._turn: int = 0
+
+    def _emit(self, event: str, data: dict[str, Any]) -> None:
+        """Fire event callback if registered."""
+        if self._on_event is not None:
+            self._on_event(event, data)
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -89,6 +116,11 @@ class ContextBus:
     def advance_turn(self) -> None:
         """Advance the turn counter — called by the harness between agent turns."""
         self._turn += 1
+        self._emit("turn_advance", {
+            "turn_number": self._turn,
+            "active_tokens": self._active_tokens,
+            "utilization": self._active_tokens / self.token_budget if self.token_budget else 0,
+        })
 
     def ingest(self, segment: Segment) -> None:
         """Add a new segment to active context.
@@ -114,6 +146,14 @@ class ContextBus:
             )
             if self.metrics:
                 self.metrics.record_ingest(segment)
+            self._emit("ingest", {
+                "seg_id": segment.seg_id,
+                "tokens": segment.token_count,
+                "source": segment.source,
+                "active_tokens": self._active_tokens,
+                "budget": self.token_budget,
+                "bypassed": True,
+            })
             return
 
         segment.tier = Tier.ACTIVE
@@ -134,6 +174,15 @@ class ContextBus:
             budget=self.token_budget,
         )
 
+        self._emit("ingest", {
+            "seg_id": segment.seg_id,
+            "tokens": segment.token_count,
+            "source": segment.source,
+            "active_tokens": self._active_tokens,
+            "budget": self.token_budget,
+            "bypassed": False,
+        })
+
         # Auto-evict if over budget
         if self._active_tokens > self.headroom_target:
             self.run_eviction_cycle()
@@ -143,23 +192,23 @@ class ContextBus:
 
         Returns the list of evicted segments for audit/telemetry.
         """
-        # Score all non-pinned active segments
-        candidates = [s for s in self._active.values() if not s.pinned]
+        self._refresh_adaptive_policy_params()
 
-        if self.scorer:
-            self.scorer.score_batch(candidates, context=self.active_segments)
-
-        # Ask the policy which segments to evict
         tokens_to_free = self._active_tokens - self.headroom_target
         if tokens_to_free <= 0:
             return []
 
-        to_evict = self.policy.select_evictions(candidates, tokens_to_free)
-        evicted: list[Segment] = []
-
-        for seg in to_evict:
-            self._evict_segment(seg)
-            evicted.append(seg)
+        if self.eviction_batch_mode == "adaptive":
+            evicted = self._run_adaptive_eviction()
+        else:
+            candidates = self._eviction_candidates()
+            if self.scorer:
+                self.scorer.score_batch(candidates, context=self.active_segments)
+            to_evict = self.policy.select_evictions(candidates, tokens_to_free)
+            evicted = []
+            for seg in to_evict:
+                self._evict_segment(seg)
+                evicted.append(seg)
 
         if self.metrics:
             self.metrics.record_eviction_cycle(evicted, self._active_tokens)
@@ -172,6 +221,50 @@ class ContextBus:
         )
 
         return evicted
+
+    def _run_adaptive_eviction(self) -> list[Segment]:
+        """Adaptive mode: batch when far over budget, otherwise evict one-at-a-time."""
+        evicted: list[Segment] = []
+
+        while self._active_tokens > self.headroom_target:
+            candidates = self._eviction_candidates()
+            if not candidates:
+                break
+
+            if self.scorer:
+                self.scorer.score_batch(candidates, context=self.active_segments)
+
+            tokens_to_free = self._active_tokens - self.headroom_target
+            utilization = self._active_utilization()
+            adaptive_single = utilization <= self.adaptive_single_evict_max_utilization
+
+            request_tokens = 1 if adaptive_single else tokens_to_free
+            selected = self.policy.select_evictions(candidates, request_tokens)
+            if not selected:
+                break
+
+            for seg in selected:
+                self._evict_segment(seg)
+                evicted.append(seg)
+                if adaptive_single:
+                    break
+
+        return evicted
+
+    def _eviction_candidates(self) -> list[Segment]:
+        """Return non-pinned active segments eligible for eviction."""
+        return [s for s in self._active.values() if not s.pinned]
+
+    def _active_utilization(self) -> float:
+        """Current active token utilization against configured budget."""
+        if self.token_budget <= 0:
+            return 0.0
+        return self._active_tokens / self.token_budget
+
+    def record_eval_result(self, check: str, passed: bool) -> None:
+        """Inject external eval outcomes into the feedback/adaptation loop."""
+        if self.feedback is not None:
+            self.feedback.on_eval_result(check, passed)
 
     def recall(self, seg_id: str) -> Segment | None:
         """Recall a segment from warm/cold/graveyard back to active (zombie path).
@@ -188,14 +281,26 @@ class ContextBus:
         segment.tier = Tier.ACTIVE
         self._active[segment.seg_id] = segment
         self._active_tokens += segment.token_count
+        self._recalled_ids.add(segment.seg_id)
 
         # Notify policy of access (T1->T2 promotion for ARC, no-op for others)
         self.policy.on_access(segment)
+
+        if self.feedback is not None:
+            self.feedback.on_recall(segment)
 
         if self.metrics:
             self.metrics.record_recall(segment)
 
         logger.info("segment_recalled", seg_id=seg_id, tier_from=segment.tier.value)
+
+        self._emit("recall", {
+            "seg_id": segment.seg_id,
+            "tokens": segment.token_count,
+            "source": segment.source,
+            "active_tokens": self._active_tokens,
+        })
+
         return segment
 
     def touch_segment(self, seg_id: str) -> bool:
@@ -272,5 +377,33 @@ class ContextBus:
             del self._active[seg.seg_id]
             self._active_tokens -= seg.token_count
 
+        if self.feedback is not None:
+            if seg.seg_id in self._recalled_ids:
+                self.feedback.on_re_eviction(seg)
+                self._recalled_ids.discard(seg.seg_id)
+            else:
+                self.feedback.on_eviction(seg)
+
         # Push to warm tier (first stop after eviction)
         self.store.demote_to_warm(seg)
+
+        self._emit("evict", {
+            "seg_id": seg.seg_id,
+            "tokens": seg.token_count,
+            "source": seg.source,
+            "score": seg.composite_score,
+            "active_tokens": self._active_tokens,
+        })
+
+    def _refresh_adaptive_policy_params(self) -> None:
+        """Update bus-level policy knobs from adaptive feedback state."""
+        if self.adaptive is None or self.feedback is None:
+            return
+
+        self.adaptive.update_from_feedback(self.feedback)
+        maybe_headroom = self.adaptive.policy_params.get("headroom_ratio")
+        if maybe_headroom is None:
+            return
+
+        # Keep configured headroom in a safe bounded range.
+        self.headroom_ratio = max(0.05, min(0.5, float(maybe_headroom)))

@@ -14,7 +14,6 @@ from ctx_rm.core.segment import SegmentRole
 from ctx_rm.drivers.llamacpp import ChatResponse, ToolCall
 from ctx_rm.watch.watcher import WatcherConfig
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
@@ -122,6 +121,33 @@ async def test_multiple_tool_calls_one_turn(tmp_path) -> None:
     assert result.tool_calls_made == 2
     # system + user + assistant(2 tc) + tool_0 + tool_1 + assistant(text) = 6
     assert len(bus.active_segments) == 6
+
+
+@pytest.mark.asyncio
+async def test_malformed_tool_arguments_do_not_crash_loop(tmp_path) -> None:
+    bus = _bus()
+    malformed = ChatResponse(
+        content=None,
+        tool_calls=[
+            ToolCall(
+                id="c0",
+                name="file_read",
+                arguments={"_malformed_json": True, "_raw": "{path: ???}"},
+            ),
+        ],
+        prompt_tokens=60,
+        completion_tokens=20,
+        total_tokens=80,
+    )
+    driver = MockDriver([malformed, _text("fallback complete")])
+    loop = AgentLoop(driver=driver, bus=bus, working_dir=str(tmp_path))
+
+    result = await loop.run("sys", "read file")
+
+    assert result.final_response == "fallback complete"
+    tool_segments = [s for s in bus.active_segments if s.role == SegmentRole.TOOL]
+    assert len(tool_segments) == 1
+    assert "malformed tool arguments JSON" in tool_segments[0].content
 
 
 # ── Max turns ────────────────────────────────────────────────────────────
@@ -371,7 +397,6 @@ async def test_recall_restores_evicted_needle(tmp_path) -> None:
     4. Needle is recalled to active before next LLM call
     """
     from ctx_rm.core.segment import Segment
-    from ctx_rm.core.tokenizer import estimate_tokens
 
     bus = _bus_with_embedding(budget=200, headroom=0.2)
     # headroom target = 200 * 0.8 = 160 tokens
@@ -474,7 +499,10 @@ async def test_recall_disabled_by_default(tmp_path) -> None:
     driver = MockDriver([_text("Done.")])
     loop = AgentLoop(driver=driver, bus=bus, working_dir=str(tmp_path))
 
-    result = await loop.run("You are a coding agent.", "Create config.json with the correct port number.")
+    result = await loop.run(
+        "You are a coding agent.",
+        "Create config.json with the correct port number.",
+    )
 
     # Needle should be evicted (budget pressure) and NOT recalled
     active_ids = {s.seg_id for s in bus.active_segments}

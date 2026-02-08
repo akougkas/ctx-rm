@@ -11,12 +11,15 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import OrderedDict
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import structlog
 
 from ctx_rm.core.scorer import HeuristicScorer, Scorer
 from ctx_rm.core.segment import Segment
+
+if TYPE_CHECKING:
+    from ctx_rm.core.adaptive import AdaptiveWeights
 
 logger = structlog.get_logger()
 
@@ -94,7 +97,7 @@ def _overlap_ratio(candidate_terms: set[str], reference_terms: set[str]) -> floa
 # It receives (segment_content, retained_summary, task_goal) and returns a dict
 # with keys: relevance_score, staleness_score, redundancy_score, composite_score.
 # All values should be floats in [0, 1].
-ScoringCallable = Callable[[str, str, str], dict[str, float]]
+ScoringCallable = Callable[[str, str, str], dict[str, float] | None]
 
 
 class SequentialScorer(Scorer):
@@ -120,12 +123,14 @@ class SequentialScorer(Scorer):
         task_goal: str = "",
         fallback: Scorer | None = None,
         max_cache_entries: int = 4096,
+        adaptive: AdaptiveWeights | None = None,
     ) -> None:
         self._scoring_fn = scoring_fn
         self._task_goal = task_goal
         self._fallback = fallback or HeuristicScorer()
         self._max_cache_entries = max_cache_entries
         self._cache: OrderedDict[tuple[str, str, str], dict[str, float]] = OrderedDict()
+        self._adaptive = adaptive
 
     def score_batch(
         self, candidates: list[Segment], context: list[Segment]
@@ -156,6 +161,7 @@ class SequentialScorer(Scorer):
                 # LRU touch
                 self._cache.move_to_end(cache_key)
                 self._apply_scores(seg, scores)
+                self._apply_adaptive(seg)
                 continue
 
             try:
@@ -171,6 +177,7 @@ class SequentialScorer(Scorer):
                 scores = {k: max(0.0, min(1.0, float(result[k]))) for k in self._REQUIRED_KEYS}
                 self._cache_set(cache_key, scores)
                 self._apply_scores(seg, scores)
+                self._apply_adaptive(seg)
 
             except Exception as e:
                 logger.debug(
@@ -182,6 +189,8 @@ class SequentialScorer(Scorer):
 
         if failed:
             self._fallback.score_batch(failed, context)
+            for seg in failed:
+                self._apply_adaptive(seg)
 
     def _validate_result(self, result: object) -> bool:
         """Check that result is a dict with all required score keys and valid values."""
@@ -208,6 +217,16 @@ class SequentialScorer(Scorer):
         seg.staleness_score = scores["staleness_score"]
         seg.redundancy_score = scores["redundancy_score"]
         seg.composite_score = scores["composite_score"]
+
+    def _apply_adaptive(self, seg: Segment) -> None:
+        """Apply adaptive overlays to composite score when configured."""
+        if self._adaptive is None or seg.composite_score is None:
+            return
+        seg.composite_score = self._adaptive.apply_to_composite(
+            seg.composite_score,
+            seg.source,
+            seg.seg_id,
+        )
 
     @staticmethod
     def _default_scoring_fn(
