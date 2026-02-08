@@ -12,11 +12,39 @@ import os
 from pathlib import Path
 from typing import Any
 
+import orjson
 import structlog
 
 logger = structlog.get_logger()
 
+_DEFAULT_INCLUDES = [
+    "*.py", "*.js", "*.ts", "*.yaml", "*.yml",
+    "*.json", "*.txt", "*.md", "*.toml", "*.cfg",
+]
+
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "done",
+            "description": "Signal task completion with a structured result.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Brief description of what was accomplished.",
+                    },
+                    "files_changed": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of files created or modified.",
+                    },
+                },
+                "required": ["summary"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -28,7 +56,15 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "path": {
                         "type": "string",
                         "description": "Absolute or relative file path to read.",
-                    }
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "1-based line number to start reading from.",
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "1-based line number to stop reading at, inclusive.",
+                    },
                 },
                 "required": ["path"],
             },
@@ -71,6 +107,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                         "type": "integer",
                         "description": "Timeout in seconds (default 30).",
                     },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory override for the command.",
+                    },
                 },
                 "required": ["command"],
             },
@@ -108,6 +148,18 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "path": {
                         "type": "string",
                         "description": "Directory or file to search in.",
+                    },
+                    "include": {
+                        "type": "string",
+                        "description": "Glob pattern for file types, e.g. '*.py'.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of matching lines to return.",
+                    },
+                    "context_lines": {
+                        "type": "integer",
+                        "description": "Number of context lines before and after each match.",
                     },
                 },
                 "required": ["pattern", "path"],
@@ -154,6 +206,7 @@ class ToolExecutor:
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
         """Execute a tool call and return the result as a string."""
         handler = {
+            "done": self._done,
             "file_read": self._file_read,
             "file_write": self._file_write,
             "file_patch": self._file_patch,
@@ -170,6 +223,15 @@ class ToolExecutor:
         except Exception as e:
             logger.warning("tool_error", tool=tool_name, error=str(e))
             return f"Error executing {tool_name}: {e}"
+
+    async def _done(self, args: dict[str, Any]) -> str:
+        """Signal task completion with structured result."""
+        payload = {
+            "status": "done",
+            "summary": args["summary"],
+            "files_changed": args.get("files_changed", []),
+        }
+        return orjson.dumps(payload).decode()
 
     def _resolve_path(self, path_str: str) -> Path:
         """Resolve a path relative to working_dir."""
@@ -195,8 +257,32 @@ class ToolExecutor:
         content = path.read_text(errors="replace")
         # Truncate very large files
         if len(content) > 50_000:
-            return content[:50_000] + f"\n\n... [truncated, {len(content)} chars total]"
-        return content
+            content = content[:50_000] + f"\n\n... [truncated, {len(content)} chars total]"
+
+        start_line = args.get("start_line")
+        end_line = args.get("end_line")
+
+        # If no range params, return raw content (backward compatible)
+        if start_line is None and end_line is None:
+            return content
+
+        # Range requested — add line numbers
+        all_lines = content.split("\n")
+        total = len(all_lines)
+
+        # Clamp values
+        s = max(1, start_line) if start_line is not None else 1
+        e = min(total, end_line) if end_line is not None else total
+
+        if s > total:
+            return ""  # Out of range — empty result
+
+        if s > e:
+            return ""  # Invalid range — empty result
+
+        selected = all_lines[s - 1 : e]
+        numbered = [f"{s + i}: {line}" for i, line in enumerate(selected)]
+        return "\n".join(numbered)
 
     async def _file_write(self, args: dict[str, Any]) -> str:
         path = self._resolve_path(args["path"])
@@ -233,12 +319,19 @@ class ToolExecutor:
         command = args["command"]
         timeout = int(args.get("timeout", 30))
 
+        # Resolve cwd: use override if provided, else working_dir
+        cwd_str = args.get("cwd")
+        if cwd_str:
+            cwd = Path(cwd_str).resolve()
+        else:
+            cwd = self.working_dir
+
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=str(self.working_dir),
+                cwd=str(cwd),
                 env={**os.environ, "PATH": os.environ.get("PATH", "")},
             )
             stdout, stderr = await asyncio.wait_for(
@@ -253,8 +346,8 @@ class ToolExecutor:
             err = stderr.decode(errors="replace")
             if err.strip():
                 result += f"\nSTDERR:\n{err}"
-        if proc.returncode != 0:
-            result += f"\n[exit code: {proc.returncode}]"
+        # Always include exit_code for consistent parsing
+        result += f"\n[exit_code: {proc.returncode}]"
         # Truncate long output
         if len(result) > 20_000:
             result = result[:20_000] + f"\n... [truncated, {len(result)} chars total]"
@@ -282,13 +375,27 @@ class ToolExecutor:
         if not path.exists():
             return f"Error: path not found: {path}"
 
+        # Build grep arguments
+        grep_args = ["grep", "-rn"]
+
+        # Include filter: explicit or default list
+        include = args.get("include")
+        if include:
+            grep_args.append(f"--include={include}")
+        else:
+            for ext in _DEFAULT_INCLUDES:
+                grep_args.append(f"--include={ext}")
+
+        # Context lines
+        context_lines = args.get("context_lines")
+        if context_lines is not None:
+            grep_args.extend(["-C", str(int(context_lines))])
+
+        grep_args.extend(["-E", pattern, str(path)])
+
         try:
             proc = await asyncio.create_subprocess_exec(
-                "grep", "-rn", "--include=*.py", "--include=*.js",
-                "--include=*.ts", "--include=*.yaml", "--include=*.yml",
-                "--include=*.json", "--include=*.txt", "--include=*.md",
-                "--include=*.toml", "--include=*.cfg",
-                "-E", pattern, str(path),
+                *grep_args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -299,6 +406,28 @@ class ToolExecutor:
         result = stdout.decode(errors="replace")
         if not result:
             return f"No matches found for pattern '{pattern}' in {path}"
+
+        # Truncate to max_results if specified
+        max_results = args.get("max_results")
+        if max_results is not None:
+            lines = result.split("\n")
+            match_count = 0
+            kept: list[str] = []
+            for line in lines:
+                if not line:
+                    continue
+                # Separator lines from -C context (--) are not matches
+                if line == "--":
+                    kept.append(line)
+                    continue
+                match_count += 1
+                if match_count <= max_results:
+                    kept.append(line)
+                else:
+                    kept.append(f"... [truncated to {max_results} results]")
+                    break
+            result = "\n".join(kept)
+
         if len(result) > 20_000:
             result = result[:20_000] + "\n... [truncated]"
         return result
