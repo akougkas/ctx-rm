@@ -65,6 +65,29 @@ class KneePoint:
     token_savings_pct: float
 
 
+@dataclass
+class ScalingRow:
+    """Context window scaling quality for a (task_id, budget) pair."""
+
+    task_id: str
+    budget: int
+    pass_rate: float
+    median_prompt_tokens: float
+    full_mode_pass_rate: float
+
+
+@dataclass
+class NoiseDegradationRow:
+    """Noise degradation comparison for a task."""
+
+    task_id: str
+    ctx_rm_pass_rate: float
+    full_pass_rate: float
+    delta: float
+    is_degradation_candidate: bool
+    num_runs: int
+
+
 # ── Analysis functions ────────────────────────────────────────────────────────
 
 
@@ -258,6 +281,124 @@ def find_knee_point(
             )
 
     return None
+
+
+def compute_scaling_quality(results_dir: Path) -> list[ScalingRow]:
+    """Compute scaling quality across budget levels for EVID-05.
+
+    For each (task_id, budget): collect pass rate and median prompt tokens from
+    ctx-rm runs. Also extract full-mode baseline pass rate per task.
+
+    Directory structure expected:
+      ctx-rm: {results_dir}/{task_id}/ctx-rm/{driver}/{policy}/run-{N}/evaluation.json
+      full:   {results_dir}/{task_id}/full/{driver}/run-{N}/evaluation.json
+    """
+    # Collect ctx-rm runs grouped by (task_id, budget)
+    ctx_rm_groups: dict[tuple[str, int], list[dict]] = {}
+    # Collect full-mode runs grouped by task_id
+    full_groups: dict[str, list[dict]] = {}
+
+    for eval_path in results_dir.rglob("evaluation.json"):
+        parts = eval_path.relative_to(results_dir).parts
+        if len(parts) < 4:
+            continue
+
+        task_id = parts[0]
+        mode = parts[1]
+
+        eval_data = orjson.loads(eval_path.read_bytes())
+        agent = eval_data.get("agent_result", {})
+
+        run_info = {
+            "passed": eval_data.get("all_passed"),
+            "prompt_tokens": agent.get("prompt_tokens", 0),
+        }
+
+        if mode == "full":
+            full_groups.setdefault(task_id, []).append(run_info)
+        elif mode == "ctx-rm":
+            budget = eval_data.get("budget", 0)
+            if budget == 0:
+                metrics_path = eval_path.parent / "metrics.json"
+                if metrics_path.exists():
+                    metrics_data = orjson.loads(metrics_path.read_bytes())
+                    budget = metrics_data.get("budget", 0)
+            ctx_rm_groups.setdefault((task_id, budget), []).append(run_info)
+
+    # Compute full-mode pass rates per task
+    full_pass_rates: dict[str, float] = {}
+    for task_id, runs in full_groups.items():
+        full_pass_rates[task_id] = _pass_rate(runs)
+
+    rows: list[ScalingRow] = []
+    for (task_id, budget), runs in sorted(ctx_rm_groups.items()):
+        pass_rate = _pass_rate(runs)
+        med_tokens = float(median([r["prompt_tokens"] for r in runs])) if runs else 0.0
+        full_rate = full_pass_rates.get(task_id, 0.0)
+
+        rows.append(ScalingRow(
+            task_id=task_id,
+            budget=budget,
+            pass_rate=pass_rate,
+            median_prompt_tokens=med_tokens,
+            full_mode_pass_rate=full_rate,
+        ))
+
+    return rows
+
+
+def find_noise_degradation(results_dir: Path) -> list[NoiseDegradationRow]:
+    """Identify tasks where full mode fails but ctx-rm passes (EVID-04).
+
+    For each task_id: compare ctx-rm vs full pass rates. A task is a
+    degradation candidate when ctx_rm_pass_rate > full_pass_rate (i.e.,
+    full mode performs worse due to noise accumulation).
+
+    Directory structure expected:
+      ctx-rm: {results_dir}/{task_id}/ctx-rm/{driver}/{policy}/run-{N}/evaluation.json
+      full:   {results_dir}/{task_id}/full/{driver}/run-{N}/evaluation.json
+    """
+    ctx_rm_groups: dict[str, list[dict]] = {}
+    full_groups: dict[str, list[dict]] = {}
+
+    for eval_path in results_dir.rglob("evaluation.json"):
+        parts = eval_path.relative_to(results_dir).parts
+        if len(parts) < 4:
+            continue
+
+        task_id = parts[0]
+        mode = parts[1]
+
+        eval_data = orjson.loads(eval_path.read_bytes())
+        run_info = {"passed": eval_data.get("all_passed")}
+
+        if mode == "full":
+            full_groups.setdefault(task_id, []).append(run_info)
+        elif mode == "ctx-rm":
+            ctx_rm_groups.setdefault(task_id, []).append(run_info)
+
+    all_tasks = sorted(set(ctx_rm_groups.keys()) | set(full_groups.keys()))
+
+    rows: list[NoiseDegradationRow] = []
+    for task_id in all_tasks:
+        ctx_runs = ctx_rm_groups.get(task_id, [])
+        full_runs = full_groups.get(task_id, [])
+
+        ctx_rate = _pass_rate(ctx_runs)
+        full_rate = _pass_rate(full_runs)
+        delta = ctx_rate - full_rate
+        num_runs = len(ctx_runs) + len(full_runs)
+
+        rows.append(NoiseDegradationRow(
+            task_id=task_id,
+            ctx_rm_pass_rate=ctx_rate,
+            full_pass_rate=full_rate,
+            delta=delta,
+            is_degradation_candidate=delta > 0,
+            num_runs=num_runs,
+        ))
+
+    return rows
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

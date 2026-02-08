@@ -12,7 +12,9 @@ from ctx_rm.benchmarks.analyzer import (
     compute_budget_knee,
     compute_eviction_accuracy,
     compute_recall_comparison,
+    compute_scaling_quality,
     find_knee_point,
+    find_noise_degradation,
 )
 
 
@@ -234,3 +236,92 @@ class TestBudgetKnee:
         # Verify the full row
         full_row = [r for r in rows if r.budget == 1_000_000][0]
         assert full_row.pass_rate == 1.0
+
+
+# ── Scaling quality ──────────────────────────────────────────────────────────
+
+
+class TestScalingQuality:
+    def test_extracts_per_budget_rates(self, tmp_path: Path) -> None:
+        """compute_scaling_quality groups ctx-rm runs by budget and includes full baseline."""
+        # ctx-rm at budget=4000: 2/3 pass
+        for i, passed in enumerate([True, True, False], 1):
+            path = tmp_path / "SCALE-001" / "ctx-rm" / "llamacpp" / "budget" / f"run-{i}" / "evaluation.json"
+            _write_json(path, _make_eval(passed=passed, prompt_tokens=3000 + i * 100, budget=4000))
+
+        # ctx-rm at budget=8000: 3/3 pass
+        for i in range(1, 4):
+            path = tmp_path / "SCALE-001" / "ctx-rm" / "llamacpp" / "budget" / f"run-{i}" / "evaluation.json"
+            # Need different budget dir to avoid collision — use metrics.json approach
+            alt_dir = tmp_path / "SCALE-001-b8k" / "ctx-rm" / "llamacpp" / "budget" / f"run-{i}"
+            _write_json(alt_dir / "evaluation.json", _make_eval(passed=True, prompt_tokens=6000 + i * 100, budget=8000))
+
+        # full mode: 3/3 pass
+        for i in range(1, 4):
+            path = tmp_path / "SCALE-001" / "full" / "llamacpp" / f"run-{i}" / "evaluation.json"
+            _write_json(path, _make_eval(passed=True, prompt_tokens=30000))
+
+        rows = compute_scaling_quality(tmp_path)
+
+        # Should have 2 ctx-rm rows (budget=4000, budget=8000)
+        ctx_rows = [r for r in rows if r.budget > 0]
+        assert len(ctx_rows) == 2
+
+        row_4k = [r for r in ctx_rows if r.budget == 4000][0]
+        assert row_4k.task_id == "SCALE-001"
+        assert row_4k.pass_rate == pytest.approx(2 / 3)
+        assert row_4k.median_prompt_tokens == 3200.0  # median of 3100, 3200, 3300
+        assert row_4k.full_mode_pass_rate == 1.0
+
+        row_8k = [r for r in ctx_rows if r.budget == 8000][0]
+        assert row_8k.pass_rate == 1.0
+
+
+# ── Noise degradation ────────────────────────────────────────────────────────
+
+
+class TestNoiseDegradation:
+    def test_identifies_candidate(self, tmp_path: Path) -> None:
+        """Task where ctx-rm passes more than full is a degradation candidate."""
+        # ctx-rm: 3/3 pass
+        for i in range(1, 4):
+            path = tmp_path / "SCALE-002" / "ctx-rm" / "llamacpp" / "budget" / f"run-{i}" / "evaluation.json"
+            _write_json(path, _make_eval(passed=True, prompt_tokens=5000))
+
+        # full: 1/3 pass (noise causes failures)
+        for i, passed in enumerate([True, False, False], 1):
+            path = tmp_path / "SCALE-002" / "full" / "llamacpp" / f"run-{i}" / "evaluation.json"
+            _write_json(path, _make_eval(passed=passed, prompt_tokens=30000))
+
+        rows = find_noise_degradation(tmp_path)
+        assert len(rows) == 1
+
+        row = rows[0]
+        assert row.task_id == "SCALE-002"
+        assert row.ctx_rm_pass_rate == 1.0
+        assert row.full_pass_rate == pytest.approx(1 / 3)
+        assert row.delta == pytest.approx(2 / 3)
+        assert row.is_degradation_candidate is True
+        assert row.num_runs == 6
+
+    def test_no_candidate(self, tmp_path: Path) -> None:
+        """Task where full passes equally or better is NOT a degradation candidate."""
+        # ctx-rm: 2/3 pass
+        for i, passed in enumerate([True, True, False], 1):
+            path = tmp_path / "SCALE-003" / "ctx-rm" / "llamacpp" / "budget" / f"run-{i}" / "evaluation.json"
+            _write_json(path, _make_eval(passed=passed, prompt_tokens=5000))
+
+        # full: 3/3 pass
+        for i in range(1, 4):
+            path = tmp_path / "SCALE-003" / "full" / "llamacpp" / f"run-{i}" / "evaluation.json"
+            _write_json(path, _make_eval(passed=True, prompt_tokens=30000))
+
+        rows = find_noise_degradation(tmp_path)
+        assert len(rows) == 1
+
+        row = rows[0]
+        assert row.task_id == "SCALE-003"
+        assert row.ctx_rm_pass_rate == pytest.approx(2 / 3)
+        assert row.full_pass_rate == 1.0
+        assert row.delta == pytest.approx(-1 / 3)
+        assert row.is_degradation_candidate is False
