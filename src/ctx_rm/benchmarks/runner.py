@@ -207,7 +207,21 @@ class BenchmarkRunner:
 
     def _build_system_prompt(self, task: Task) -> str:
         return "\n".join([
-            "You are a coding agent. Complete the task using the available tools.",
+            "You are a coding agent. Complete the assigned task using the available tools.",
+            "",
+            "## Workflow",
+            "1. Read files to understand the codebase before making changes.",
+            "2. For large files, use start_line and end_line to read specific sections.",
+            "3. Use grep_search with include and max_results to find relevant code efficiently.",
+            "4. After modifying a file, read back the changed section to verify your edit.",
+            "5. When the task is complete, call the done tool with a summary of what you did.",
+            "",
+            "## Tool Tips",
+            "- file_read: Use start_line/end_line for partial reads of large files.",
+            "- grep_search: Use include='*.py' to filter by file type, max_results=10 to limit output.",
+            "- file_patch: The old_text must be unique in the file. Read first to find the exact text.",
+            "- run_shell: Check exit codes. A non-zero exit code means the command failed.",
+            "- done: Call this when the task is complete. Include summary and files_changed.",
             "",
             "## Task Scenario",
             task.scenario.strip(),
