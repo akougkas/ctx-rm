@@ -5,34 +5,35 @@
 See: .planning/PROJECT.md (updated 2026-02-08)
 
 **Core value:** An agent running with ctx-rm can process workloads exceeding its context window without accuracy degradation, proven by reproducible benchmarks.
-**Current focus:** Phase 2 - Scenarios & Accuracy (in progress)
+**Current focus:** Phase 4 - Results Analysis (next)
 
 ## Current Position
 
-Phase: 2 of 4 (Scenarios & Accuracy)
-Plan: 2 of 3 in current phase (02-01, 02-02 complete)
-Status: In progress
-Last activity: 2026-02-08 -- Completed 02-01-PLAN.md (Heavyweight Scale Fixtures)
+Phase: 3 of 4 (Experiment Framework)
+Plan: 1 of 1 in current phase
+Status: Phase complete
+Last activity: 2026-02-08 -- Completed 03-01 (Experiment Framework), Phase 3 done
 
-Progress: [████░░░░░░] 40%
+Progress: [████████░░] 75%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4
-- Average duration: 11.5 min
-- Total execution time: 44 min
+- Total plans completed: 6
+- Average duration: 10 min
+- Total execution time: 62 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01-agent-hardening | 2 | 7 min | 3.5 min |
-| 02-scenarios-accuracy | 2 | 37 min | 18.5 min |
+| 02-scenarios-accuracy | 3 | 52 min | 17.3 min |
+| 03-experiment-framework | 1 | 3 min | 3.0 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (3 min), 01-02 (4 min), 02-02 (3 min), 02-01 (34 min)
-- Trend: 02-01 took longer due to 34 fixture files with substantial content
+- Last 5 plans: 02-02 (3 min), 02-01 (34 min), 02-03 (15 min), 03-01 (3 min)
+- Trend: Phase 3 was a single focused plan, executed quickly
 
 *Updated after each plan completion*
 
@@ -59,6 +60,12 @@ Recent decisions affecting current work:
 - Default recall_budget=3 per turn; 0 disables recall -- from 02-02
 - Scale fixtures use realistic business/technical prose for noise, not lorem ipsum -- from 02-01
 - SCALE-001/002/003 target 20K/30K/40K tokens with context_injections adding 17K-35K more -- from 02-01
+- Budget target is 50% of total injected tokens (center of 40-60% range) -- from 02-03
+- ADMISSION_THRESHOLD=4024 from P75 of 34 SCALE fixture file sizes -- from 02-03
+- Runner auto-selects from BUDGET_MAP only in ctx-rm mode; explicit --budget overrides -- from 02-03
+- Non-ctx-rm modes deduplicated in experiment combinations: policy/budget only expand for ctx-rm -- from 03-01
+- budget=0 in RunConfig signals auto-select from BUDGET_MAP at runtime -- from 03-01
+- Aggregation excludes errored runs from stats but counts them in num_errors -- from 03-01
 
 ### Pending Todos
 
@@ -72,5 +79,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-08
-Stopped at: Completed 02-01-PLAN.md (Heavyweight Scale Fixtures) -- 02-01 and 02-02 both done
-Resume file: .planning/phases/02-scenarios-accuracy/02-03-PLAN.md
+Stopped at: Phase 3 complete (1 plan done). Ready for Phase 4.
+Resume file: .planning/ROADMAP.md (Phase 4: Results Analysis)
