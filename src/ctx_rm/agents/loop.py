@@ -141,6 +141,9 @@ class AgentLoop:
                     pair_group = uuid.uuid4().hex[:8]
                     self._ingest_assistant_tool_calls(response, pair_group)
 
+                    done_called = False
+                    done_result: str | None = None
+
                     for tc in response.tool_calls:
                         self._emit("tool_call", {
                             "name": tc.name,
@@ -155,8 +158,22 @@ class AgentLoop:
                             )
                         else:
                             result = await self.tool_executor.execute(tc.name, tc.arguments)
+
                         self._ingest_tool_result(tc, result, pair_group)
                         tool_calls_made += 1
+
+                        logger.info(
+                            "turn_log",
+                            turn=turn + 1,
+                            tool=tc.name,
+                            outcome_preview=result[:200],
+                            tokens_prompt=response.prompt_tokens,
+                            tokens_completion=response.completion_tokens,
+                        )
+
+                        if tc.name == "done":
+                            done_called = True
+                            done_result = result
 
                     self._cleanup_orphaned_pairs()
                 else:
@@ -168,6 +185,14 @@ class AgentLoop:
                     "completion_tokens": response.completion_tokens,
                     "tool_calls": len(response.tool_calls) if response.tool_calls else 0,
                 })
+
+                # Done tool terminates the loop immediately
+                if response.tool_calls and done_called:
+                    return self._build_result(
+                        done_result, turn + 1,
+                        total_prompt, total_completion, tool_calls_made,
+                        watcher,
+                    )
 
                 if not response.tool_calls:
                     return self._build_result(
