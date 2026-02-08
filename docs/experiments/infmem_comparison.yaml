@@ -1,0 +1,141 @@
+schema_version: 1
+benchmark_name: infmem_comparable_setup
+description: >-
+  Experiment matrix for comparing ctx-rm against an InfMem-style long-context
+  control baseline under matched budgets, model backbones, and task families.
+paper_reference: "infmem.md (InfMem: Learning System-2 Memory Control for Long-Context Agent)"
+fairness_controls:
+  - "Use the same backbone model for all compared variants in each run set."
+  - "Use identical task instances, random seeds, and fixture snapshots."
+  - "Compare at matched token budgets (32k, 64k, 128k, 256k equivalent bands)."
+  - "No external corpus retrieval; only in-document retrieval and local tools are allowed."
+  - "Use identical max turns and tool permissions per run."
+
+experiments:
+  - id: EXP-COND-001
+    claim: "Conditional scoring beats independent scoring"
+    hypothesis: >-
+      SequentialScorer (task + retained-set conditioned) improves pass rate at
+      equal or lower token cost than HeuristicScorer.
+    tasks:
+      - CR-001
+      - CR-002
+      - CR-003
+      - CR-004
+      - CR-005
+      - CR-006
+      - CR-007
+      - CR-008
+      - CR-009
+      - CR-010
+    metrics:
+      - eval_pass_rate
+      - total_prompt_tokens
+      - total_completion_tokens
+      - recalls_made
+      - eviction_precision
+    control:
+      label: heuristic-static
+      description: "Current ctx-rm baseline"
+      mode: ctx-rm
+      driver: llamacpp
+      token_budget: 100000
+      scorer: heuristic
+      policy: budget
+      enable_recall: true
+      max_turns: 30
+    challenger:
+      label: sequential-static
+      description: "Phase 1 conditional scorer"
+      mode: ctx-rm
+      driver: llamacpp
+      token_budget: 100000
+      scorer: sequential
+      policy: budget
+      enable_recall: true
+      max_turns: 30
+    acceptance_criteria:
+      - "Sequential pass rate >= heuristic on at least 7/10 tasks."
+      - "Sequential token usage <= heuristic median token usage."
+
+  - id: EXP-COST-001
+    claim: "Bounded memory reaches full-context quality at lower cost"
+    hypothesis: >-
+      ctx-rm with recall and conditional scoring matches full-context eval quality
+      while reducing prompt tokens.
+    tasks:
+      - CR-001
+      - CR-003
+      - CR-005
+      - CR-007
+      - CR-009
+    metrics:
+      - eval_pass_rate
+      - total_prompt_tokens
+      - total_completion_tokens
+      - recalls_made
+    control:
+      label: full-context
+      description: "No eviction baseline"
+      mode: full
+      driver: llamacpp
+      token_budget: 1000000
+      scorer: heuristic
+      policy: null
+      enable_recall: false
+      max_turns: 30
+    challenger:
+      label: ctx-rm-sequential
+      description: "Context removal with recall"
+      mode: ctx-rm
+      driver: llamacpp
+      token_budget: 100000
+      scorer: sequential
+      policy: budget
+      enable_recall: true
+      max_turns: 30
+    acceptance_criteria:
+      - "ctx-rm pass rate is within 2 points of full-context."
+      - "ctx-rm median prompt tokens are <= 0.5x full-context."
+
+  - id: EXP-NOISE-001
+    claim: "Active context control can beat full-context under heavy noise"
+    hypothesis: >-
+      On high-noise tasks, eviction + recall improves signal-to-noise and can
+      exceed full-context success rate.
+    tasks:
+      - CR-004
+      - CR-006
+      - CR-008
+      - CR-010
+      - MULTI-001
+      - TRACE-001
+      - SPEC-001
+    metrics:
+      - eval_pass_rate
+      - recalls_made
+      - total_prompt_tokens
+      - failure_mode_tags
+    control:
+      label: full-context-noisy
+      description: "All context retained"
+      mode: full
+      driver: llamacpp
+      token_budget: 1000000
+      scorer: heuristic
+      policy: null
+      enable_recall: false
+      max_turns: 30
+    challenger:
+      label: ctx-rm-filtering
+      description: "Budget-aware eviction + sequential scoring + recall"
+      mode: ctx-rm
+      driver: llamacpp
+      token_budget: 100000
+      scorer: sequential
+      policy: budget
+      enable_recall: true
+      max_turns: 30
+    acceptance_criteria:
+      - "ctx-rm beats full-context on >= 2 noise-heavy tasks."
+      - "ctx-rm prompt tokens stay <= 0.6x full-context median."

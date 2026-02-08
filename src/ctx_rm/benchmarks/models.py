@@ -108,3 +108,44 @@ class BenchmarkSuite(BaseModel):
     benchmark_name: str
     description: str
     tasks: list[Task]
+
+
+# ── Experiment Matrix Models ────────────────────────────────────────────────
+
+
+class ExperimentVariant(BaseModel):
+    """One runnable variant in an experiment comparison."""
+
+    label: str
+    description: str
+    mode: Literal["minimal", "ctx-rm", "full"]
+    driver: str
+    token_budget: int
+    scorer: str = "heuristic"
+    policy: str | None = None
+    enable_recall: bool = False
+    max_turns: int = 30
+
+
+class ExperimentDefinition(BaseModel):
+    """A single hypothesis test in an experiment suite."""
+
+    id: str
+    claim: str
+    hypothesis: str
+    tasks: list[str]
+    metrics: list[str]
+    control: ExperimentVariant
+    challenger: ExperimentVariant
+    acceptance_criteria: list[str]
+
+
+class ExperimentSuite(BaseModel):
+    """Top-level container for machine-readable experiment matrices."""
+
+    schema_version: int
+    benchmark_name: str
+    description: str
+    paper_reference: str
+    fairness_controls: list[str]
+    experiments: list[ExperimentDefinition]
