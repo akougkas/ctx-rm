@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import orjson
 import structlog
@@ -46,6 +47,21 @@ from ctx_rm.watch.watcher import Watcher, WatcherConfig
 
 logger = structlog.get_logger()
 
+if TYPE_CHECKING:
+    from ctx_rm.benchmarks.models import Task
+
+
+def _task_goal_text(task: "Task") -> str:
+    """Build a semantic task goal string for scorer conditioning."""
+    success = "; ".join(task.success_criteria[:3])
+    return "\n".join(
+        [
+            f"Task: {task.title}",
+            f"Scenario: {task.scenario.strip()}",
+            f"Success criteria: {success}",
+        ]
+    )
+
 
 class BenchmarkRunner:
     """Orchestrator for benchmark experiments."""
@@ -71,12 +87,14 @@ class BenchmarkRunner:
         self.yaml_path = yaml_path
         self.fixtures_root = fixtures_root
         self.run_index = run_index
+        self._task_goal = task_id
 
     async def run(self) -> None:
         """Execute the benchmark."""
         # Load task from YAML
         loader = TaskLoader(self.yaml_path)
         task = loader.get_task(self.task_id)
+        self._task_goal = _task_goal_text(task)
 
         # Resolve and create fixture working copy
         fixture_name = FixtureManager.resolve_fixture_name(task.repo_fixture)
@@ -357,13 +375,13 @@ class BenchmarkRunner:
                 host=config.ollama_host,
                 model=config.ollama_model,
                 max_concurrent=config.ollama_max_concurrent,
-                task_goal=self.task_id,
+                task_goal=self._task_goal,
             )
         if config.scorer == "sequential":
             from ctx_rm.core.scorer_sequential import SequentialScorer
 
             return SequentialScorer(
-                task_goal=self.task_id,
+                task_goal=self._task_goal,
                 fallback=HeuristicScorer(source_weight=0.3),
             )
         return HeuristicScorer()
@@ -442,6 +460,7 @@ class AgentLoopRunner:
         self.run_index = run_index
         self.max_turns = max_turns
         self.enable_recall = enable_recall
+        self._task_goal = task_id
 
     async def run(self) -> None:
         """Load task, create fixture, run agent, evaluate."""
@@ -479,6 +498,8 @@ class AgentLoopRunner:
 
         result_dir = self._result_dir()
         result_dir.mkdir(parents=True, exist_ok=True)
+
+        self._task_goal = _task_goal_text(task)
 
         metrics = MetricsCollector()
 
@@ -706,7 +727,7 @@ class AgentLoopRunner:
                 host=config.ollama_host,
                 model=config.ollama_model,
                 max_concurrent=config.ollama_max_concurrent,
-                task_goal=self.task_id,
+                task_goal=self._task_goal,
             )
         if config.scorer == "sequential":
             from ctx_rm.core.scorer_sequential import SequentialScorer
@@ -717,7 +738,7 @@ class AgentLoopRunner:
                 else HeuristicScorer()
             )
             return SequentialScorer(
-                task_goal=self.task_id,
+                task_goal=self._task_goal,
                 fallback=fallback,
             )
         # Source-aware scoring for ctx-rm mode: needles score higher than noise

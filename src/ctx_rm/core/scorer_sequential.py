@@ -134,13 +134,17 @@ class SequentialScorer(Scorer):
         """
         scoring_fn = self._scoring_fn or self._default_scoring_fn
 
-        retained_summary = summarize_retained_set(context)
-        retained_hash = _hash(retained_summary)
         task_hash = _hash(self._task_goal)
 
         failed: list[Segment] = []
 
         for seg in candidates:
+            # Exclude the candidate itself when computing retained-set context.
+            # ContextBus passes active segments as both candidates and context,
+            # so this preserves proper marginal-value semantics.
+            retained_segments = [s for s in context if s.seg_id != seg.seg_id]
+            retained_summary = summarize_retained_set(retained_segments)
+            retained_hash = _hash(retained_summary)
             seg_hash = _hash(seg.content)
             cache_key = (seg_hash, retained_hash, task_hash)
 

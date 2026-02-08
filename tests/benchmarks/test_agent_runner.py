@@ -236,6 +236,39 @@ class TestAgentLoopRunner:
         assert scorer._fallback.w_source == pytest.approx(0.3)
 
     @pytest.mark.asyncio
+    async def test_create_scorer_sequential_uses_semantic_task_goal(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """AgentLoopRunner should condition sequential scoring on task semantics."""
+        from ctx_rm.benchmarks.runner import AgentLoopRunner
+        from ctx_rm.core.scorer_sequential import SequentialScorer
+
+        fixture_dir = tmp_path / "fixture"
+        fixture_dir.mkdir()
+        task = _make_task(fixture_dir)
+
+        monkeypatch.setenv("CTX_RM_SCORER", "sequential")
+        runner = AgentLoopRunner(
+            driver_name="llamacpp",
+            task_id="TEST-001",
+            mode="ctx-rm",
+            output_dir=tmp_path / "results",
+        )
+
+        await runner.run_with_task(
+            task=task,
+            working_copy=fixture_dir,
+            driver_factory=lambda: FakeChatDriver(fixture_dir),
+        )
+
+        scorer = runner._create_scorer()
+        assert isinstance(scorer, SequentialScorer)
+        assert scorer._task_goal != "TEST-001"
+        assert task.scenario in scorer._task_goal
+
+    @pytest.mark.asyncio
     async def test_ctx_rm_mode_runs_end_to_end(self, tmp_path: Path) -> None:
         from ctx_rm.benchmarks.runner import AgentLoopRunner
 

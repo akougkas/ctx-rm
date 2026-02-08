@@ -249,6 +249,37 @@ class TestSequentialScorerCache:
 
 
 class TestSequentialScorerDefaultConditional:
+    def test_candidate_excluded_from_retained_summary(self) -> None:
+        captured: dict[str, str] = {}
+
+        def spy_fn(content: str, retained: str, task: str) -> dict[str, float]:
+            captured[content] = retained
+            return {
+                "relevance_score": 0.5,
+                "staleness_score": 0.5,
+                "redundancy_score": 0.0,
+                "composite_score": 0.5,
+            }
+
+        seg_a = _seg("alpha_token")
+        seg_b = _seg("beta_token")
+        scorer = SequentialScorer(scoring_fn=spy_fn, task_goal="task")
+
+        scorer.score_batch([seg_a, seg_b], [seg_a, seg_b])
+
+        assert "alpha_token" not in captured["alpha_token"]
+        assert "beta_token" in captured["alpha_token"]
+        assert "beta_token" not in captured["beta_token"]
+        assert "alpha_token" in captured["beta_token"]
+
+    def test_single_segment_has_zero_redundancy(self) -> None:
+        seg = _seg("only segment")
+        scorer = SequentialScorer(scoring_fn=None, task_goal="only")
+
+        scorer.score_batch([seg], [seg])
+
+        assert seg.redundancy_score == pytest.approx(0.0)
+
     def test_task_condition_changes_score(self) -> None:
         seg_a = _seg("configure ssl proxy to localhost 3000")
         seg_b = _seg("configure ssl proxy to localhost 3000")

@@ -160,6 +160,23 @@ def test_create_scorer_sequential_uses_source_aware_fallback(
     assert scorer._fallback.w_source == pytest.approx(0.3)
 
 
+def test_create_scorer_sequential_uses_semantic_task_goal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sequential scorer should be conditioned on task semantics, not task id."""
+    runner, _ = _make_runner(tmp_path, mode="ctx-rm")
+    from ctx_rm.core.scorer_sequential import SequentialScorer
+
+    monkeypatch.setenv("CTX_RM_SCORER", "sequential")
+    asyncio.run(runner.run())
+    scorer = runner._create_scorer()
+
+    assert isinstance(scorer, SequentialScorer)
+    assert scorer._task_goal != "CR-001"
+    assert "Scenario:" in scorer._task_goal
+
+
 def test_runner_imports_embedding_provider() -> None:
     """BenchmarkRunner imports HashingEmbeddingProvider for ctx-rm mode."""
     from ctx_rm.benchmarks.runner import HashingEmbeddingProvider
