@@ -57,7 +57,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 03-01-PLAN.md -- Experiment config model, combination runner, aggregation, Rich table, CSV export
+- [x] 03-01-PLAN.md -- Experiment config model, combination runner, aggregation, Rich table, CSV export
 
 ### Phase 4: Evidence
 **Goal**: Reproducible data proves that ctx-rm eviction + recall outperforms naive context management on heavyweight workloads
@@ -72,8 +72,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 04-01: Run core experiments (eviction accuracy, recall effectiveness, budget sensitivity)
-- [ ] 04-02: Scaling and edge cases (context window scaling, identify the full-fails-ctxrm-passes task)
+- [ ] 04-01-PLAN.md -- Eviction source telemetry, experiment YAML configs (EVID-01/02/03), results analyzer module [wave 1]
+- [ ] 04-02-PLAN.md -- Scaling and noise degradation configs (EVID-04/05), analyzer extensions, ctx-rm analyze CLI [wave 2, depends on 04-01]
 
 ## Progress
 
@@ -84,5 +84,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 |-------|----------------|--------|-----------|
 | 1. Agent Hardening | 2/2 | ✓ Complete | 2026-02-08 |
 | 2. Scenarios & Accuracy | 3/3 | ✓ Complete | 2026-02-08 |
-| 3. Experiment Framework | 0/1 | Not started | - |
+| 3. Experiment Framework | 1/1 | ✓ Complete | 2026-02-08 |
 | 4. Evidence | 0/2 | Not started | - |
