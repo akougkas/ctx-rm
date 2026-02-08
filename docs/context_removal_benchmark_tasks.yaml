@@ -409,3 +409,248 @@ tasks:
       - check: file_contains
         target: nginx/nginx.conf
         must_include: "listen 443 ssl"
+
+  - id: SCALE-001
+    title: large_codebase_navigation
+    expected_winner: removal
+    eviction_pressure: gradual_buildup
+    min_turns: 30
+    repo_fixture: fixtures/scale_codebase_nav
+    scenario: >
+      A web service has a bug in its authentication service. The auth module calls
+      user.validate_token() but the User model only defines verify_token(). The
+      correct method name is specified in the project settings. Find the bug by
+      reading the config, the User model, and the auth service, then fix it.
+    needles:
+      - id: N1
+        type: fact
+        injection_turn: 3
+        injection_method: config_read
+        content: "TOKEN_VERIFY_METHOD = 'verify_token' -- this is the canonical method name."
+        risk_if_evicted: "Agent might guess a method name or use validate_token."
+      - id: N2
+        type: code
+        injection_turn: 5
+        injection_method: file_read
+        content: "User model defines verify_token(self, token) -> bool at line 87."
+        risk_if_evicted: "Agent doesn't know the exact method signature."
+    context_injections:
+      - turn: 4
+        type: large_util_dump
+        size_tokens: 5000
+        description: "Utility helper functions and verbose docstrings."
+      - turn: 8
+        type: test_output_dump
+        size_tokens: 8000
+        description: "Full test suite output with stack traces."
+      - turn: 12
+        type: middleware_docs
+        size_tokens: 4000
+        description: "Middleware documentation and config examples."
+    success_criteria:
+      - "auth.py calls user.verify_token() instead of user.validate_token()"
+      - "No other files broken by the fix"
+    evaluation:
+      - check: file_contains
+        target: src/services/auth.py
+        must_include: "verify_token"
+      - check: file_not_contains
+        target: src/services/auth.py
+        must_include: "validate_token"
+
+  - id: SCALE-002
+    title: multi_step_refactoring
+    expected_winner: removal
+    eviction_pressure: gradual_buildup
+    min_turns: 30
+    repo_fixture: fixtures/scale_multi_refactor
+    scenario: >
+      Rename the DataProcessor class to StreamProcessor across the entire codebase.
+      A migration note specifies that the process_batch method must also be renamed
+      to stream_batch as part of the new API contract. Update all imports, references,
+      and method calls in every file.
+    needles:
+      - id: N1
+        type: fact
+        injection_turn: 2
+        injection_method: migration_note
+        content: "CRITICAL: When renaming DataProcessor, also rename process_batch to stream_batch per new API contract."
+        risk_if_evicted: "Agent renames class but leaves old method name, breaking API."
+    context_injections:
+      - turn: 5
+        type: architecture_docs
+        size_tokens: 8000
+        description: "Detailed architecture documentation with diagrams."
+      - turn: 10
+        type: ci_config_dump
+        size_tokens: 6000
+        description: "CI/CD pipeline configs and deployment scripts."
+      - turn: 15
+        type: readme_and_changelog
+        size_tokens: 6000
+        description: "Full README and changelog history."
+      - turn: 20
+        type: test_output
+        size_tokens: 5000
+        description: "Test runner output with timing data."
+    success_criteria:
+      - "DataProcessor renamed to StreamProcessor everywhere"
+      - "process_batch renamed to stream_batch everywhere"
+      - "No references to old names remain"
+    evaluation:
+      - check: file_not_contains
+        target: src/core/data_processor.py
+        must_include: "class DataProcessor"
+      - check: file_contains
+        target: src/core/data_processor.py
+        must_include: "class StreamProcessor"
+      - check: file_not_contains
+        target: src/core/data_processor.py
+        must_include: "def process_batch"
+      - check: file_contains
+        target: src/core/data_processor.py
+        must_include: "def stream_batch"
+      - check: file_not_contains
+        target: src/core/pipeline.py
+        must_include: "DataProcessor"
+      - check: file_contains
+        target: src/core/pipeline.py
+        must_include: "StreamProcessor"
+      - check: file_not_contains
+        target: src/handlers/input_handler.py
+        must_include: "DataProcessor"
+      - check: file_contains
+        target: src/handlers/input_handler.py
+        must_include: "StreamProcessor"
+
+  - id: SCALE-003
+    title: information_synthesis
+    expected_winner: removal
+    eviction_pressure: sustained_pressure
+    min_turns: 30
+    repo_fixture: fixtures/scale_info_synthesis
+    scenario: >
+      Read 10 quarterly and departmental reports, extract one critical metric from
+      each, and write a complete executive summary in output/summary.txt. The template
+      in templates/executive_summary.txt shows the required format. Every metric must
+      be present and accurate.
+    needles:
+      - id: N1
+        type: fact
+        injection_turn: 2
+        injection_method: report_read
+        content: "Q1 revenue was $4.2M"
+        risk_if_evicted: "Agent guesses or omits Q1 revenue."
+      - id: N2
+        type: fact
+        injection_turn: 4
+        injection_method: report_read
+        content: "Q2 revenue was $5.1M"
+        risk_if_evicted: "Agent guesses or omits Q2 revenue."
+      - id: N3
+        type: fact
+        injection_turn: 6
+        injection_method: report_read
+        content: "Q3 revenue was $3.8M"
+        risk_if_evicted: "Agent guesses or omits Q3 revenue."
+      - id: N4
+        type: fact
+        injection_turn: 8
+        injection_method: report_read
+        content: "Q4 revenue was $6.7M"
+        risk_if_evicted: "Agent guesses or omits Q4 revenue."
+      - id: N5
+        type: fact
+        injection_turn: 10
+        injection_method: report_read
+        content: "Total inventory: 142,500 units"
+        risk_if_evicted: "Agent omits inventory count."
+      - id: N6
+        type: fact
+        injection_turn: 12
+        injection_method: report_read
+        content: "Average shipping time: 3.2 days"
+        risk_if_evicted: "Agent omits shipping metric."
+      - id: N7
+        type: fact
+        injection_turn: 14
+        injection_method: report_read
+        content: "Return rate: 4.7%"
+        risk_if_evicted: "Agent omits return rate."
+      - id: N8
+        type: fact
+        injection_turn: 16
+        injection_method: report_read
+        content: "Marketing spend: $890K"
+        risk_if_evicted: "Agent omits marketing spend."
+      - id: N9
+        type: fact
+        injection_turn: 18
+        injection_method: report_read
+        content: "Headcount: 247 employees"
+        risk_if_evicted: "Agent omits headcount."
+      - id: N10
+        type: fact
+        injection_turn: 20
+        injection_method: report_read
+        content: "Net profit margin: 12.3%"
+        risk_if_evicted: "Agent omits profit margin."
+    context_injections:
+      - turn: 3
+        type: verbose_report_prose
+        size_tokens: 6000
+        description: "Quarterly narrative with market analysis."
+      - turn: 7
+        type: verbose_report_prose
+        size_tokens: 6000
+        description: "Supply chain analysis and logistics data."
+      - turn: 11
+        type: verbose_report_prose
+        size_tokens: 6000
+        description: "Customer satisfaction surveys and NPS data."
+      - turn: 15
+        type: verbose_report_prose
+        size_tokens: 6000
+        description: "Competitive analysis and market positioning."
+      - turn: 19
+        type: verbose_report_prose
+        size_tokens: 6000
+        description: "Annual planning outlook and forecasts."
+      - turn: 22
+        type: verbose_report_prose
+        size_tokens: 5000
+        description: "HR policies and benefits documentation."
+    success_criteria:
+      - "output/summary.txt contains all 10 metrics"
+      - "All numbers are accurate (not hallucinated)"
+    evaluation:
+      - check: file_contains
+        target: output/summary.txt
+        must_include: "4.2M"
+      - check: file_contains
+        target: output/summary.txt
+        must_include: "5.1M"
+      - check: file_contains
+        target: output/summary.txt
+        must_include: "3.8M"
+      - check: file_contains
+        target: output/summary.txt
+        must_include: "6.7M"
+      - check: file_contains
+        target: output/summary.txt
+        must_include: "142,500"
+      - check: file_contains
+        target: output/summary.txt
+        must_include: "3.2"
+      - check: file_contains
+        target: output/summary.txt
+        must_include: "4.7%"
+      - check: file_contains
+        target: output/summary.txt
+        must_include: "890K"
+      - check: file_contains
+        target: output/summary.txt
+        must_include: "247"
+      - check: file_contains
+        target: output/summary.txt
+        must_include: "12.3%"
