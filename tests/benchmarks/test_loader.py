@@ -22,8 +22,12 @@ def loader() -> TaskLoader:
 
 def test_load_all_tasks(loader: TaskLoader) -> None:
     suite = loader.load()
-    assert len(suite.tasks) == 10
-    expected_ids = [f"CR-{i:03d}" for i in range(1, 11)]
+    assert len(suite.tasks) == 13
+    expected_ids = [f"CR-{i:03d}" for i in range(1, 11)] + [
+        "MULTI-001",
+        "TRACE-001",
+        "SPEC-001",
+    ]
     assert [t.id for t in suite.tasks] == expected_ids
 
 

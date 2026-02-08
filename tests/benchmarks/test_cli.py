@@ -313,12 +313,15 @@ def test_compare_empty_results(tmp_path: Path) -> None:
 
 
 def test_tasks_lists_all_benchmark_tasks() -> None:
-    """tasks command lists all 10 benchmark tasks."""
+    """tasks command lists all benchmark tasks including phase-7 additions."""
     result = runner.invoke(app, ["tasks"])
     assert result.exit_code == 0, result.output
     assert "CR-001" in result.output
     assert "CR-010" in result.output
-    assert "10 tasks available" in result.output
+    assert "MULTI-001" in result.output
+    assert "TRACE-001" in result.output
+    assert "SPEC-001" in result.output
+    assert "13 tasks available" in result.output
 
 
 # ── info tests ───────────────────────────────────────────────────────────────
@@ -375,6 +378,32 @@ def test_bench_llamacpp_routes_to_agent_loop_runner(mock_runner_cls: MagicMock) 
     mock_runner_cls.assert_called_once()
     call_kwargs = mock_runner_cls.call_args.kwargs
     assert call_kwargs["driver_name"] == "llamacpp"
+
+
+@patch("ctx_rm.benchmarks.runner.AgentLoopRunner")
+def test_bench_llamacpp_passes_recall_and_max_turns(mock_runner_cls: MagicMock) -> None:
+    """Recall and max turns flags should be forwarded to AgentLoopRunner."""
+    mock_instance = MagicMock()
+    mock_instance.run = AsyncMock()
+    mock_runner_cls.return_value = mock_instance
+
+    result = runner.invoke(
+        app,
+        [
+            "bench",
+            "--driver",
+            "llamacpp",
+            "--task",
+            "CR-001",
+            "--enable-recall",
+            "--max-turns",
+            "42",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    call_kwargs = mock_runner_cls.call_args.kwargs
+    assert call_kwargs["enable_recall"] is True
+    assert call_kwargs["max_turns"] == 42
 
 
 def test_bench_rejects_invalid_driver() -> None:

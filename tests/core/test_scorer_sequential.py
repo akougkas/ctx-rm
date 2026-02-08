@@ -247,6 +247,18 @@ class TestSequentialScorerCache:
 
         assert call_count == 2
 
+    def test_cache_is_bounded(self) -> None:
+        scorer = SequentialScorer(
+            scoring_fn=_good_scoring_fn,
+            task_goal="test",
+            max_cache_entries=2,
+        )
+        scorer.score_batch([_seg("A")], [])
+        scorer.score_batch([_seg("B")], [])
+        scorer.score_batch([_seg("C")], [])
+
+        assert len(scorer._cache) == 2
+
 
 class TestSequentialScorerDefaultConditional:
     def test_candidate_excluded_from_retained_summary(self) -> None:

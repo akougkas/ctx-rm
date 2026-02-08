@@ -317,3 +317,95 @@ tasks:
       - check: file_contains
         target: src/net/retry.py
         must_include: "exponential_backoff"
+
+  - id: MULTI-001
+    title: cross_file_constraint
+    expected_winner: removal
+    eviction_pressure: sudden_injection
+    min_turns: 20
+    repo_fixture: fixtures/multi_constraint_service
+    scenario: >
+      Apply a cross-file change: service must run on port 8443 and app startup
+      must reference the config module rather than hardcoded values.
+    needles:
+      - id: N1
+        type: fact
+        injection_turn: 3
+        injection_method: spec_note
+        content: "Service port MUST be 8443 and app.py must import config values."
+        risk_if_evicted: "Agent changes one file only or leaves hardcoded 8080."
+    context_injections:
+      - turn: 8
+        type: unrelated_python_docs
+        size_tokens: 2000
+        description: "Long unrelated Python docstrings and style docs."
+    success_criteria:
+      - "config.yaml sets port to 8443."
+      - "app.py references config values instead of hardcoded port."
+    evaluation:
+      - check: file_contains
+        target: config/config.yaml
+        must_include: "port: 8443"
+      - check: file_contains
+        target: src/app.py
+        must_include: "from config import"
+
+  - id: TRACE-001
+    title: bug_hunt_in_log_noise
+    expected_winner: removal
+    eviction_pressure: sudden_injection
+    min_turns: 20
+    repo_fixture: fixtures/trace_bug_hunt
+    scenario: >
+      Investigate noisy auth failures. Implement a safe extraction path that
+      handles missing user_id keys without crashing.
+    needles:
+      - id: N1
+        type: fact
+        injection_turn: 4
+        injection_method: log_trace
+        content: "Root cause: KeyError on 'user_id' in src/auth.py line 6."
+        risk_if_evicted: "Agent patches unrelated code and leaves crash path."
+    context_injections:
+      - turn: 9
+        type: verbose_log_noise
+        size_tokens: 3000
+        description: "Auth traces, retries, and red-herring stack traces."
+    success_criteria:
+      - "safe_extract handles missing user_id via dict.get or explicit check."
+    evaluation:
+      - check: file_contains
+        target: src/fix.py
+        must_include: "payload.get('user_id')"
+
+  - id: SPEC-001
+    title: config_synthesis_from_spec
+    expected_winner: removal
+    eviction_pressure: sudden_injection
+    min_turns: 20
+    repo_fixture: fixtures/spec_proxy_synthesis
+    scenario: >
+      Update nginx config based on spec: /api must proxy to localhost:3000 and
+      server should terminate SSL.
+    needles:
+      - id: N1
+        type: fact
+        injection_turn: 2
+        injection_method: product_spec
+        content: "Must proxy /api to localhost:3000 with SSL termination on 443."
+        risk_if_evicted: "Agent leaves proxy at 3001 or keeps plaintext-only listener."
+    context_injections:
+      - turn: 7
+        type: unrelated_nginx_configs
+        size_tokens: 2000
+        description: "Configs for other services and old deployment notes."
+    success_criteria:
+      - "nginx.conf proxies /api to localhost:3000."
+      - "nginx.conf includes SSL listener."
+    evaluation:
+      - check: file_contains
+        target: nginx/nginx.conf
+        must_include: "proxy_pass http://localhost:3000"
+      - check: file_contains
+        target: nginx/nginx.conf
+        must_include: "listen 443 ssl"

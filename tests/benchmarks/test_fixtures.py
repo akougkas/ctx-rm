@@ -15,11 +15,14 @@ def fm() -> FixtureManager:
 
 
 def test_list_fixtures(fm: FixtureManager):
-    """FixtureManager lists all 10 fixture directories."""
+    """FixtureManager lists all fixture directories."""
     fixtures = fm.list_fixtures()
-    assert len(fixtures) == 10
+    assert len(fixtures) == 13
     assert "legacy_flag_cascade" in fixtures
     assert "multi_issue_thread" in fixtures
+    assert "multi_constraint_service" in fixtures
+    assert "trace_bug_hunt" in fixtures
+    assert "spec_proxy_synthesis" in fixtures
 
 
 def test_create_working_copy(fm: FixtureManager):

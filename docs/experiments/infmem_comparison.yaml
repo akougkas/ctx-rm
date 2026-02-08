@@ -108,9 +108,9 @@ experiments:
       - CR-006
       - CR-008
       - CR-010
-      - CR-001
-      - CR-005
-      - CR-007
+      - MULTI-001
+      - TRACE-001
+      - SPEC-001
     metrics:
       - eval_pass_rate
       - recalls_made

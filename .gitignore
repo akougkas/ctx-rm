@@ -209,5 +209,4 @@ __marimo__/
 # ctx-rm specific
 results/
 *.db
-benchmarks/fixtures/
 .planning/

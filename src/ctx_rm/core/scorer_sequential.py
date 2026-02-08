@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import OrderedDict
 from typing import Callable
 
 import structlog
@@ -118,11 +119,13 @@ class SequentialScorer(Scorer):
         scoring_fn: ScoringCallable | None = None,
         task_goal: str = "",
         fallback: Scorer | None = None,
+        max_cache_entries: int = 4096,
     ) -> None:
         self._scoring_fn = scoring_fn
         self._task_goal = task_goal
         self._fallback = fallback or HeuristicScorer()
-        self._cache: dict[tuple[str, str, str], dict[str, float]] = {}
+        self._max_cache_entries = max_cache_entries
+        self._cache: OrderedDict[tuple[str, str, str], dict[str, float]] = OrderedDict()
 
     def score_batch(
         self, candidates: list[Segment], context: list[Segment]
@@ -150,6 +153,8 @@ class SequentialScorer(Scorer):
 
             if cache_key in self._cache:
                 scores = self._cache[cache_key]
+                # LRU touch
+                self._cache.move_to_end(cache_key)
                 self._apply_scores(seg, scores)
                 continue
 
@@ -164,7 +169,7 @@ class SequentialScorer(Scorer):
                     continue
 
                 scores = {k: max(0.0, min(1.0, float(result[k]))) for k in self._REQUIRED_KEYS}
-                self._cache[cache_key] = scores
+                self._cache_set(cache_key, scores)
                 self._apply_scores(seg, scores)
 
             except Exception as e:
@@ -189,6 +194,13 @@ class SequentialScorer(Scorer):
             if not isinstance(val, (int, float)):
                 return False
         return True
+
+    def _cache_set(self, key: tuple[str, str, str], value: dict[str, float]) -> None:
+        self._cache[key] = value
+        self._cache.move_to_end(key)
+        # Bound cache growth for long-running sessions and benchmark sweeps.
+        if len(self._cache) > self._max_cache_entries:
+            self._cache.popitem(last=False)
 
     @staticmethod
     def _apply_scores(seg: Segment, scores: dict[str, float]) -> None:

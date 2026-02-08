@@ -221,6 +221,12 @@ def bench(
     model: Annotated[str | None, typer.Option(
         help="Override model name (sets CTX_RM_GEMINI_MODEL).",
     )] = None,
+    enable_recall: Annotated[bool, typer.Option(
+        help="Enable recall in AgentLoopRunner (llamacpp driver only).",
+    )] = False,
+    max_turns: Annotated[int, typer.Option(
+        help="Maximum agent turns for AgentLoopRunner (llamacpp driver only).",
+    )] = 30,
     all_tasks: Annotated[bool, typer.Option(
         "--all", help="Run all tasks x modes x available drivers.",
     )] = False,
@@ -238,7 +244,14 @@ def bench(
         os.environ["CTX_RM_GEMINI_MODEL"] = model
 
     if all_tasks:
-        _run_batch(policy=policy, budget=budget, output=output, scorer=scorer)
+        _run_batch(
+            policy=policy,
+            budget=budget,
+            output=output,
+            scorer=scorer,
+            enable_recall=enable_recall,
+            max_turns=max_turns,
+        )
         return
 
     # Single run
@@ -251,6 +264,8 @@ def bench(
     if mode == Mode.ctx_rm:
         header.append(f"  policy={policy.value}", style="yellow")
         header.append(f"  scorer={scorer.value}", style="magenta")
+        if driver == Driver.llamacpp:
+            header.append(f"  recall={enable_recall}", style="magenta")
     header.append(f"  budget={budget:,}", style="dim")
     header.append(f"  run={run_index}", style="dim")
     console.print(header)
@@ -267,6 +282,8 @@ def bench(
             policy_name=policy.value,
             output_dir=output,
             run_index=run_index,
+            max_turns=max_turns,
+            enable_recall=enable_recall,
         )
     else:
         from ctx_rm.benchmarks.runner import BenchmarkRunner
@@ -302,6 +319,8 @@ def _run_batch(
     budget: int,
     output: Path,
     scorer: ScorerChoice,
+    enable_recall: bool,
+    max_turns: int,
 ) -> None:
     """Batch mode: all tasks x 3 modes x available drivers."""
     from ctx_rm.benchmarks.loader import TaskLoader
@@ -361,6 +380,8 @@ def _run_batch(
                             token_budget=budget,
                             policy_name=policy.value,
                             output_dir=output,
+                            max_turns=max_turns,
+                            enable_recall=enable_recall,
                         )
                     else:
                         runner = BenchmarkRunner(
