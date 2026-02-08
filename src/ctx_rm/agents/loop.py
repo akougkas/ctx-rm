@@ -54,6 +54,7 @@ class AgentResult:
     bus_stats: dict[str, Any]
     watcher_stats: dict[str, Any] | None = None
     recalls_made: int = 0
+    recall_precision: float = 0.0
 
 
 class AgentLoop:
@@ -73,6 +74,7 @@ class AgentLoop:
         watcher_config: WatcherConfig | None = None,
         enable_recall: bool = False,
         recall_top_k: int = 1,
+        recall_budget: int = 3,
         on_progress: ProgressCallback | None = None,
     ) -> None:
         self.driver = driver
@@ -82,12 +84,19 @@ class AgentLoop:
         self.watcher_config = watcher_config
         self.enable_recall = enable_recall
         self.recall_top_k = recall_top_k
+        self.recall_budget = recall_budget
         self._on_progress = on_progress
         self._task_text: str = ""  # Set in run(), used as recall query
         self._recalls_made: int = 0
         self._recalled_ids: set[str] = set()  # Prevent recall thrashing
+        self._recalls_this_turn: int = 0  # Reset each turn for budget enforcement
         self._consecutive_failures: int = 0
         self._failure_threshold: int = 3
+
+        # Recall precision tracking: how many recalled segments proved useful
+        self._recall_precision_total: int = 0
+        self._recall_precision_hits: int = 0
+        self._recalled_contents: dict[str, str] = {}  # seg_id -> content snippet
 
     def _emit(self, event: str, data: dict[str, Any]) -> None:
         """Fire progress callback if registered."""
@@ -114,6 +123,7 @@ class AgentLoop:
 
             for turn in range(self.max_turns):
                 self.bus.advance_turn()
+                self._recalls_this_turn = 0  # Reset per-turn recall budget
                 self._try_recall()
 
                 self._emit("turn_start", {
@@ -162,6 +172,8 @@ class AgentLoop:
                             result = await self.tool_executor.execute(tc.name, tc.arguments)
 
                         self._ingest_tool_result(tc, result, pair_group)
+                        self._check_recall_precision(result)
+                        self._try_content_recall(tc.name, tc.arguments, result)
                         tool_calls_made += 1
 
                         logger.info(
@@ -260,8 +272,12 @@ class AgentLoop:
         Uses the task instruction as a search query against warm + cold tiers.
         Only recalls segments with safe sources (no assistant/tool pairs).
         Runs once per segment — recalled IDs are tracked to prevent thrashing.
+        Respects per-turn recall_budget.
         """
         if not self.enable_recall:
+            return
+
+        if self._recalls_this_turn >= self.recall_budget:
             return
 
         store_stats = self.bus.store.get_stats()
@@ -274,6 +290,9 @@ class AgentLoop:
             "found_count": len(results),
         })
         for seg in results:
+            if self._recalls_this_turn >= self.recall_budget:
+                break
+
             # Skip already-recalled segments (prevent thrashing)
             if seg.seg_id in self._recalled_ids:
                 continue
@@ -286,13 +305,101 @@ class AgentLoop:
             recalled = self.bus.recall(seg.seg_id)
             if recalled is not None:
                 self._recalls_made += 1
+                self._recalls_this_turn += 1
                 self._recalled_ids.add(recalled.seg_id)
+                self._recall_precision_total += 1
+                self._recalled_contents[recalled.seg_id] = recalled.content[:200]
                 logger.info(
                     "recall_triggered",
                     seg_id=recalled.seg_id,
                     source=recalled.source,
                     tokens=recalled.token_count,
                 )
+
+    def _try_content_recall(self, tool_name: str, tool_args: dict[str, Any], tool_result: str) -> None:
+        """Content-based recall: search evicted segments matching tool result content.
+
+        Fires after each tool result is ingested. Catches the case where an agent
+        re-reads a file that was previously evicted — the evicted segment's content
+        overlaps with the new tool result.
+        """
+        if not self.enable_recall:
+            return
+
+        if self._recalls_this_turn >= self.recall_budget:
+            return
+
+        # Build a content query from the tool call context
+        query_parts: list[str] = []
+
+        # For file_read, use the file path as the primary search key
+        if tool_name == "file_read":
+            path = tool_args.get("path", "")
+            if path:
+                query_parts.append(path)
+
+        # Also search by a snippet of the tool result content
+        if tool_result and not tool_result.startswith("Error"):
+            query_parts.append(tool_result[:150])
+
+        if not query_parts:
+            return
+
+        query = " ".join(query_parts)
+
+        store_stats = self.bus.store.get_stats()
+        if store_stats["warm_count"] + store_stats["cold_count"] == 0:
+            return
+
+        results = self.bus.search_evicted(query, top_k=self.recall_top_k)
+        for seg in results:
+            if self._recalls_this_turn >= self.recall_budget:
+                break
+
+            if seg.seg_id in self._recalled_ids:
+                continue
+
+            # Content recall allows recalling tool segments (unlike task-based recall)
+            # but still skip assistant segments to preserve pair integrity
+            source_prefix = (seg.source or "").split(":")[0]
+            if source_prefix in {"assistant_response", "assistant_tool_call"}:
+                continue
+
+            recalled = self.bus.recall(seg.seg_id)
+            if recalled is not None:
+                self._recalls_made += 1
+                self._recalls_this_turn += 1
+                self._recalled_ids.add(recalled.seg_id)
+                self._recall_precision_total += 1
+                self._recalled_contents[recalled.seg_id] = recalled.content[:200]
+                logger.info(
+                    "content_recall_triggered",
+                    seg_id=recalled.seg_id,
+                    source=recalled.source,
+                    tokens=recalled.token_count,
+                    tool=tool_name,
+                )
+
+    def _check_recall_precision(self, tool_result: str) -> None:
+        """Check if any recalled content appears in a subsequent tool result.
+
+        A "hit" means the recalled segment's content was relevant — it appeared
+        in a subsequent tool call's output, validating the recall decision.
+        """
+        if not self._recalled_contents:
+            return
+
+        matched_ids: list[str] = []
+        for seg_id, content_snippet in self._recalled_contents.items():
+            # Check for meaningful overlap (at least 20 chars of the snippet in result)
+            check_text = content_snippet[:100]
+            if len(check_text) >= 20 and check_text in tool_result:
+                self._recall_precision_hits += 1
+                matched_ids.append(seg_id)
+
+        # Remove matched entries (one-shot precision check)
+        for sid in matched_ids:
+            del self._recalled_contents[sid]
 
     # ── Ingestion helpers ────────────────────────────────────────────────
 
@@ -468,6 +575,11 @@ class AgentLoop:
         stats = self.bus.get_stats()
         store = stats["store_stats"]
         evicted = store["warm_count"] + store["cold_count"] + store["graveyard_count"]
+        precision = (
+            self._recall_precision_hits / self._recall_precision_total
+            if self._recall_precision_total > 0
+            else 0.0
+        )
         return AgentResult(
             final_response=final_response,
             turns=turns,
@@ -478,4 +590,5 @@ class AgentLoop:
             bus_stats=stats,
             watcher_stats=watcher.get_stats() if watcher is not None else None,
             recalls_made=self._recalls_made,
+            recall_precision=precision,
         )
