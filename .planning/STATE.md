@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-08)
 
 **Core value:** An agent running with ctx-rm can process workloads exceeding its context window without accuracy degradation, proven by reproducible benchmarks.
-**Current focus:** Phase 4 - Evidence (in progress)
+**Current focus:** Phase 4 - Evidence (complete)
 
 ## Current Position
 
 Phase: 4 of 4 (Evidence)
-Plan: 1 of 2 in current phase
-Status: In progress
-Last activity: 2026-02-08 -- Completed 04-01 (Evidence Telemetry & Analyzer)
+Plan: 2 of 2 in current phase
+Status: Phase complete
+Last activity: 2026-02-08 -- Completed 04-02 (Evidence Collection & Report)
 
-Progress: [█████████░] 88%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 7
-- Average duration: 9 min
-- Total execution time: 65 min
+- Total plans completed: 8
+- Average duration: 8 min
+- Total execution time: 69 min
 
 **By Phase:**
 
@@ -30,10 +30,10 @@ Progress: [█████████░] 88%
 | 01-agent-hardening | 2 | 7 min | 3.5 min |
 | 02-scenarios-accuracy | 3 | 52 min | 17.3 min |
 | 03-experiment-framework | 1 | 3 min | 3.0 min |
-| 04-evidence | 1 | 3 min | 3.0 min |
+| 04-evidence | 2 | 7 min | 3.5 min |
 
 **Recent Trend:**
-- Last 5 plans: 02-01 (34 min), 02-03 (15 min), 03-01 (3 min), 04-01 (3 min)
+- Last 5 plans: 02-03 (15 min), 03-01 (3 min), 04-01 (3 min), 04-02 (4 min)
 - Trend: Consistent fast execution on focused plans
 
 *Updated after each plan completion*
@@ -69,6 +69,8 @@ Recent decisions affecting current work:
 - Aggregation excludes errored runs from stats but counts them in num_errors -- from 03-01
 - EvictionEvent.source tracks seg.source for post-hoc noise vs needle analysis -- from 04-01
 - Analyzer walks result directory tree; structure mirrors BenchmarkRunner._result_dir output -- from 04-01
+- Budget proxies for effective context window size in scaling experiments -- from 04-02
+- Noise degradation uses 5 runs for statistical confidence -- from 04-02
 
 ### Pending Todos
 
@@ -82,5 +84,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-08
-Stopped at: Phase 4, plan 1 of 2 complete. Next: 04-02 (Evidence Collection & Report).
-Resume file: .planning/phases/04-evidence/04-02-PLAN.md
+Stopped at: Phase 4 complete. All 8 plans across 4 phases executed. Evidence infrastructure ready.
+Resume file: SESSION-NEXT.md
