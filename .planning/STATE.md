@@ -10,29 +10,29 @@ See: .planning/PROJECT.md (updated 2026-02-08)
 ## Current Position
 
 Phase: 2 of 4 (Scenarios & Accuracy)
-Plan: 2 of 3 in current phase
+Plan: 2 of 3 in current phase (02-01, 02-02 complete)
 Status: In progress
-Last activity: 2026-02-08 -- Completed 02-02-PLAN.md (Scorer Weights & Content Recall)
+Last activity: 2026-02-08 -- Completed 02-01-PLAN.md (Heavyweight Scale Fixtures)
 
 Progress: [████░░░░░░] 40%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 3
-- Average duration: 3.3 min
-- Total execution time: 10 min
+- Total plans completed: 4
+- Average duration: 11.5 min
+- Total execution time: 44 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01-agent-hardening | 2 | 7 min | 3.5 min |
-| 02-scenarios-accuracy | 1 | 3 min | 3 min |
+| 02-scenarios-accuracy | 2 | 37 min | 18.5 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (3 min), 01-02 (4 min), 02-02 (3 min)
-- Trend: stable
+- Last 5 plans: 01-01 (3 min), 01-02 (4 min), 02-02 (3 min), 02-01 (34 min)
+- Trend: 02-01 took longer due to 34 fixture files with substantial content
 
 *Updated after each plan completion*
 
@@ -57,6 +57,8 @@ Recent decisions affecting current work:
 - Content recall allows recalling tool segments (broadened from safe-source filter) -- from 02-02
 - Recall precision uses 100-char content overlap as hit detection -- from 02-02
 - Default recall_budget=3 per turn; 0 disables recall -- from 02-02
+- Scale fixtures use realistic business/technical prose for noise, not lorem ipsum -- from 02-01
+- SCALE-001/002/003 target 20K/30K/40K tokens with context_injections adding 17K-35K more -- from 02-01
 
 ### Pending Todos
 
@@ -70,5 +72,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-08
-Stopped at: Completed 02-02-PLAN.md (Scorer Weights & Content Recall)
+Stopped at: Completed 02-01-PLAN.md (Heavyweight Scale Fixtures) -- 02-01 and 02-02 both done
 Resume file: .planning/phases/02-scenarios-accuracy/02-03-PLAN.md
