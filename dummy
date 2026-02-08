@@ -1,0 +1,62 @@
+You are Coder working in `/home/akougkas/projects/_worktrees/ctx-rm-worktree`.
+
+Mission: implement the full ctx-rm vision end-to-end with real code, real tests, and real experiment outputs. Avoid docs-only work.
+
+Execution mode:
+- Be autonomous and implementation-first.
+- Use agents aggressively and in parallel for non-trivial work.
+- Prefer `claude-opus-4.6` for deep reasoning and architecture decisions.
+- Prefer `code-gpt-5.3-codex` for high-throughput multi-file implementation.
+- Reconcile agent outputs and commit only validated code.
+
+Mandatory first steps:
+1. Read: `NEXT-STEPS.md`, `README.md`, `docs/architecture.md`, `docs/tiered_graveyard.md`, `docs/infmem_comparable_setup.md`, `docs/experiments/infmem_comparison.yaml`, `infmem.md`.
+2. Run full tests and report failures/warnings.
+3. Produce a concrete execution plan with code deliverables for Milestone 1 + Milestone 2.
+4. Start coding immediately.
+
+Deliverables to complete:
+
+Milestone 1
+- Phase 7: task redesign/adaptation
+  - Keep all 13 tasks runnable (CR-001..CR-010 + MULTI-001/TRACE-001/SPEC-001).
+  - Ensure noise realism and recall toggles are wired.
+  - Ensure `ctx-rm compare` and experiment matrix remain valid.
+- Phase 8: agent hardening
+  - Retry/backoff for transient llama-server failures.
+  - Malformed tool-call JSON recovery.
+  - Context-window tracking from model metadata.
+  - Robust tool error handling and continuation behavior.
+- Phase 9: CI/coverage
+  - GH Actions workflow, coverage gate, pre-commit checks.
+
+Milestone 2
+- Phase 1: robust SequentialScorer
+  - Keep bounded cache and semantic task-goal conditioning.
+  - Add stronger LLM-backed conditional backend with safe fallback.
+- Phase 2: adaptive batch eviction
+  - Implement fixed vs adaptive modes and tests.
+- Phase 3: feedback/adaptation loop
+  - Add `feedback.py` + `adaptive.py` and wire into bus/scorer/policy.
+- Phase 4: experiment harness
+  - Config-driven A/B runner with confidence intervals and repeat runs.
+
+Research/benchmark requirements
+- Build credible InfMem-comparable experiments (apples-to-apples protocol).
+- Extend harness for long-context QA-style workloads (not only coding fixtures).
+- Report metrics: pass/EM/F1, token usage, recall rate, eviction precision, latency.
+- Run multi-seed sweeps and publish tables in `results/`.
+
+Constraints
+- Production-ready code only.
+- Add tests for every behavior change.
+- Run affected tests after each batch.
+- No destructive git operations.
+
+Output discipline per work batch
+1. Implement.
+2. Test.
+3. Show concrete changed files.
+4. Summarize measured outcomes.
+5. Move to next batch without waiting.
+
