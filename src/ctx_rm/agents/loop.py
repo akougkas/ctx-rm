@@ -86,6 +86,8 @@ class AgentLoop:
         self._task_text: str = ""  # Set in run(), used as recall query
         self._recalls_made: int = 0
         self._recalled_ids: set[str] = set()  # Prevent recall thrashing
+        self._consecutive_failures: int = 0
+        self._failure_threshold: int = 3
 
     def _emit(self, event: str, data: dict[str, Any]) -> None:
         """Fire progress callback if registered."""
@@ -171,11 +173,28 @@ class AgentLoop:
                             tokens_completion=response.completion_tokens,
                         )
 
+                        # Track consecutive failures for hint injection
+                        if result.startswith("Error"):
+                            self._consecutive_failures += 1
+                        else:
+                            self._consecutive_failures = 0
+
                         if tc.name == "done":
                             done_called = True
                             done_result = result
 
                     self._cleanup_orphaned_pairs()
+
+                    # Inject hint after threshold consecutive failures
+                    if self._consecutive_failures >= self._failure_threshold:
+                        hint = (
+                            f"Note: {self._consecutive_failures} consecutive tool calls "
+                            "have failed. Consider trying a different approach: check "
+                            "file paths with list_directory, verify file contents before "
+                            "patching, or simplify your command."
+                        )
+                        self._ingest_user_hint(hint)
+                        self._consecutive_failures = 0
                 else:
                     self._ingest_assistant_text(response)
 
@@ -297,6 +316,18 @@ class AgentLoop:
             metadata={"openai_message": {"role": "user", "content": content}},
         )
         self.bus.ingest(seg)
+
+    def _ingest_user_hint(self, content: str) -> None:
+        """Inject a hint message as a user-role message into the bus."""
+        seg = Segment(
+            content=content,
+            role=SegmentRole.USER,
+            token_count=estimate_tokens(content),
+            source="system_hint",
+            metadata={"openai_message": {"role": "user", "content": content}},
+        )
+        self.bus.ingest(seg)
+        logger.info("failure_hint_injected", hint=content[:120])
 
     def _ingest_assistant_text(self, response: ChatResponse) -> None:
         content = response.content or ""
