@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from ctx_rm.benchmarks.budget_map import ADMISSION_THRESHOLD, BUDGET_MAP
+from ctx_rm.benchmarks.runner import BenchmarkRunner
 
 YAML_PATH = Path("docs/context_removal_benchmark_tasks.yaml")
 
@@ -139,3 +140,58 @@ class TestScaleBudgetsForceEviction:
                 f"{tid}: budget={budget} >= 0.6*noise={threshold} "
                 f"(noise={noise})"
             )
+
+
+# ── Runner integration ──────────────────────────────────────────────────
+
+
+class TestRunnerBudgetMapIntegration:
+    """Verify BenchmarkRunner uses BUDGET_MAP and ADMISSION_THRESHOLD."""
+
+    def test_runner_uses_budget_map(self) -> None:
+        """ctx-rm mode with default budget should use BUDGET_MAP lookup."""
+        runner = BenchmarkRunner(
+            task_id="CR-001",
+            mode="ctx-rm",
+            # token_budget left at default (100_000)
+        )
+        bus = runner._create_bus()
+        assert bus.token_budget == BUDGET_MAP["CR-001"]
+
+    def test_runner_explicit_budget_overrides_map(self) -> None:
+        """Explicit budget should override BUDGET_MAP."""
+        runner = BenchmarkRunner(
+            task_id="CR-001",
+            mode="ctx-rm",
+            token_budget=5000,
+        )
+        bus = runner._create_bus()
+        assert bus.token_budget == 5000
+
+    def test_runner_full_mode_ignores_map(self) -> None:
+        """Full mode uses FULL_BUDGET regardless of BUDGET_MAP."""
+        runner = BenchmarkRunner(
+            task_id="CR-001",
+            mode="full",
+        )
+        bus = runner._create_bus()
+        assert bus.token_budget == BenchmarkRunner.FULL_BUDGET
+
+    def test_runner_admission_threshold_from_map(self) -> None:
+        """Bus admission_threshold should match the profiled constant."""
+        runner = BenchmarkRunner(
+            task_id="CR-001",
+            mode="ctx-rm",
+        )
+        bus = runner._create_bus()
+        assert bus.admission_threshold == ADMISSION_THRESHOLD
+
+    def test_runner_minimal_mode_uses_default_budget(self) -> None:
+        """Minimal mode with default budget should use token_budget as-is."""
+        runner = BenchmarkRunner(
+            task_id="CR-001",
+            mode="minimal",
+        )
+        bus = runner._create_bus()
+        # minimal mode doesn't trigger budget_map lookup
+        assert bus.token_budget == BenchmarkRunner.DEFAULT_TOKEN_BUDGET

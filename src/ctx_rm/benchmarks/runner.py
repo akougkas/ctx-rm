@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 import orjson
 import structlog
 
+from ctx_rm.benchmarks.budget_map import ADMISSION_THRESHOLD, BUDGET_MAP
 from ctx_rm.benchmarks.evaluator import Evaluator
 from ctx_rm.benchmarks.executor import generate_noise
 from ctx_rm.benchmarks.fixtures import FixtureManager
@@ -68,13 +69,14 @@ class BenchmarkRunner:
     """
 
     FULL_BUDGET = 1_000_000
+    DEFAULT_TOKEN_BUDGET = 100_000
 
     def __init__(
         self,
         driver_name: str = "llamacpp",
         task_id: str = "CR-001",
         mode: str = "ctx-rm",
-        token_budget: int = 100_000,
+        token_budget: int = DEFAULT_TOKEN_BUDGET,
         policy_name: str = "budget",
         output_dir: Path = Path("./results"),
         yaml_path: Path = Path("docs/context_removal_benchmark_tasks.yaml"),
@@ -89,6 +91,7 @@ class BenchmarkRunner:
         self.task_id = task_id
         self.mode = mode
         self.token_budget = token_budget
+        self._explicit_budget = token_budget != self.DEFAULT_TOKEN_BUDGET
         self.policy_name = policy_name
         self.output_dir = output_dir
         self.yaml_path = yaml_path
@@ -277,7 +280,7 @@ class BenchmarkRunner:
     def _create_bus(self) -> ContextBus:
         from ctx_rm.core.embedding import HashingEmbeddingProvider
 
-        budget = self.FULL_BUDGET if self.mode == "full" else self.token_budget
+        budget = self._resolve_budget()
 
         store = TieredStore(
             embedding_provider=HashingEmbeddingProvider(),
@@ -295,10 +298,42 @@ class BenchmarkRunner:
             scorer=scorer,
             eviction_batch_mode=config.eviction_batch_mode,
             adaptive_single_evict_max_utilization=config.adaptive_single_evict_max_utilization,
+            admission_threshold=ADMISSION_THRESHOLD,
             feedback=feedback,
             adaptive=adaptive,
             on_event=self._on_bus_event,
         )
+
+    def _resolve_budget(self) -> int:
+        """Select the token budget for the current run.
+
+        Priority:
+          1. ``full`` mode -> FULL_BUDGET (no eviction)
+          2. Explicit budget provided by user -> use as-is
+          3. ``ctx-rm`` mode + task in BUDGET_MAP -> use calibrated budget
+          4. Fall through to configured ``self.token_budget``
+        """
+        if self.mode == "full":
+            return self.FULL_BUDGET
+
+        if not self._explicit_budget and self.mode == "ctx-rm":
+            mapped = BUDGET_MAP.get(self.task_id)
+            if mapped is not None:
+                logger.info(
+                    "budget_selected",
+                    task=self.task_id,
+                    budget=mapped,
+                    source="budget_map",
+                )
+                return mapped
+
+        logger.info(
+            "budget_selected",
+            task=self.task_id,
+            budget=self.token_budget,
+            source="explicit" if self._explicit_budget else "default",
+        )
+        return self.token_budget
 
     # ── Driver creation ────────────────────────────────────────────────
 
