@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from ctx_rm.core.scorer import Scorer
 from ctx_rm.core.scorer_sequential import (
     SequentialScorer,
     summarize_retained_set,
@@ -156,9 +157,18 @@ class TestSequentialScorerFallback:
 
         assert seg.composite_score is not None
 
-    def test_no_scoring_fn_delegates_to_fallback(self) -> None:
-        """When scoring_fn is None, entire batch goes to fallback."""
-        scorer = SequentialScorer(scoring_fn=None, task_goal="test")
+    def test_no_scoring_fn_uses_builtin_conditional_backend(self) -> None:
+        """Without scoring_fn, scorer still performs sequential scoring."""
+
+        class FailingFallback(Scorer):
+            def score_batch(self, candidates: list[Segment], context: list[Segment]) -> None:
+                raise AssertionError("fallback should not be called")
+
+        scorer = SequentialScorer(
+            scoring_fn=None,
+            task_goal="ssl proxy localhost 3000",
+            fallback=FailingFallback(),
+        )
         seg = _seg()
 
         scorer.score_batch([seg], [])
@@ -236,6 +246,35 @@ class TestSequentialScorerCache:
         scorer.score_batch([_seg("content B")], [])
 
         assert call_count == 2
+
+
+class TestSequentialScorerDefaultConditional:
+    def test_task_condition_changes_score(self) -> None:
+        seg_a = _seg("configure ssl proxy to localhost 3000")
+        seg_b = _seg("configure ssl proxy to localhost 3000")
+
+        scorer_a = SequentialScorer(scoring_fn=None, task_goal="ssl proxy localhost")
+        scorer_b = SequentialScorer(scoring_fn=None, task_goal="postgres migration index")
+
+        scorer_a.score_batch([seg_a], [])
+        scorer_b.score_batch([seg_b], [])
+
+        assert seg_a.relevance_score > seg_b.relevance_score
+        assert seg_a.composite_score > seg_b.composite_score
+
+    def test_retained_set_condition_changes_redundancy(self) -> None:
+        low_overlap_seg = _seg("proxy /api to localhost 3000 with ssl")
+        high_overlap_seg = _seg("proxy /api to localhost 3000 with ssl")
+
+        scorer = SequentialScorer(scoring_fn=None, task_goal="proxy /api with ssl")
+        low_context = [_seg("refactor module to improve readability")]
+        high_context = [_seg("proxy /api to localhost 3000 with ssl termination")]
+
+        scorer.score_batch([low_overlap_seg], low_context)
+        scorer.score_batch([high_overlap_seg], high_context)
+
+        assert high_overlap_seg.redundancy_score > low_overlap_seg.redundancy_score
+        assert high_overlap_seg.composite_score < low_overlap_seg.composite_score
 
     def test_different_context_invalidates_cache(self) -> None:
         """Same segment content but different retained context = cache miss."""

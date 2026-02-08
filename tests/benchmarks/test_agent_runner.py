@@ -214,6 +214,27 @@ class TestAgentLoopRunner:
 
         assert len(bus.active_segments) == 0
 
+    def test_create_scorer_sequential_uses_source_aware_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """AgentLoopRunner should keep source-aware fallback for ctx-rm mode."""
+        from ctx_rm.benchmarks.runner import AgentLoopRunner
+        from ctx_rm.core.scorer import HeuristicScorer
+        from ctx_rm.core.scorer_sequential import SequentialScorer
+
+        monkeypatch.setenv("CTX_RM_SCORER", "sequential")
+        runner = AgentLoopRunner(
+            driver_name="llamacpp",
+            task_id="TEST-001",
+            mode="ctx-rm",
+        )
+
+        scorer = runner._create_scorer()
+        assert isinstance(scorer, SequentialScorer)
+        assert isinstance(scorer._fallback, HeuristicScorer)
+        assert scorer._fallback.w_source == pytest.approx(0.3)
+
     @pytest.mark.asyncio
     async def test_ctx_rm_mode_runs_end_to_end(self, tmp_path: Path) -> None:
         from ctx_rm.benchmarks.runner import AgentLoopRunner

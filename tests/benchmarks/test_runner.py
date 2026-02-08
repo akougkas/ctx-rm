@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import orjson
+import pytest
 
 from ctx_rm.benchmarks.runner import BenchmarkRunner
 from ctx_rm.drivers.base import AgentDriver, AgentResponse
@@ -140,6 +141,23 @@ def test_create_scorer_defaults_to_heuristic(tmp_path: Path) -> None:
 
     scorer = runner._create_scorer()
     assert isinstance(scorer, HeuristicScorer)
+
+
+def test_create_scorer_sequential_uses_source_aware_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sequential scorer should preserve source-aware fallback behavior."""
+    runner, _ = _make_runner(tmp_path, mode="ctx-rm")
+    from ctx_rm.core.scorer import HeuristicScorer
+    from ctx_rm.core.scorer_sequential import SequentialScorer
+
+    monkeypatch.setenv("CTX_RM_SCORER", "sequential")
+    scorer = runner._create_scorer()
+
+    assert isinstance(scorer, SequentialScorer)
+    assert isinstance(scorer._fallback, HeuristicScorer)
+    assert scorer._fallback.w_source == pytest.approx(0.3)
 
 
 def test_runner_imports_embedding_provider() -> None:

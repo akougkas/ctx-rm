@@ -9,6 +9,7 @@ fallback to HeuristicScorer on failure. Results are cached by
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Callable
 
 import structlog
@@ -22,6 +23,24 @@ logger = structlog.get_logger()
 _SUMMARY_SEGMENT_LIMIT = 200
 # Maximum total characters for the retained-set summary
 _SUMMARY_TOTAL_LIMIT = 2000
+
+_TOKEN_RE = re.compile(r"[a-zA-Z0-9_]{3,}")
+_STOP_WORDS = frozenset(
+    {
+        "and",
+        "are",
+        "for",
+        "from",
+        "has",
+        "have",
+        "into",
+        "that",
+        "the",
+        "this",
+        "with",
+        "you",
+    }
+)
 
 
 def summarize_retained_set(segments: list[Segment], *, max_total: int = _SUMMARY_TOTAL_LIMIT) -> str:
@@ -52,6 +71,24 @@ def _hash(text: str) -> str:
     return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
 
+def _clamp(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def _keywords(text: str) -> set[str]:
+    return {
+        token
+        for token in _TOKEN_RE.findall(text.lower())
+        if token not in _STOP_WORDS
+    }
+
+
+def _overlap_ratio(candidate_terms: set[str], reference_terms: set[str]) -> float:
+    if not reference_terms:
+        return 0.0
+    return len(candidate_terms & reference_terms) / len(reference_terms)
+
+
 # Type alias for the scoring callable.
 # It receives (segment_content, retained_summary, task_goal) and returns a dict
 # with keys: relevance_score, staleness_score, redundancy_score, composite_score.
@@ -64,8 +101,9 @@ class SequentialScorer(Scorer):
 
     For each candidate segment, builds a retained-context summary and
     invokes *scoring_fn(segment_content, retained_summary, task_goal)*.
-    The callable should return a dict with score fields. On any failure
-    or invalid return, falls back to HeuristicScorer.
+    If no scoring_fn is supplied, a built-in conditional lexical backend is
+    used so sequential scoring remains active in production wiring.
+    On any failure or invalid return, falls back to HeuristicScorer.
 
     Results are cached by (segment_hash, retained_set_hash, task_hash)
     so repeated scoring of the same segment in the same context is free.
@@ -94,9 +132,7 @@ class SequentialScorer(Scorer):
         Sets relevance_score, staleness_score, redundancy_score, and
         composite_score on each segment in-place.
         """
-        if self._scoring_fn is None:
-            self._fallback.score_batch(candidates, context)
-            return
+        scoring_fn = self._scoring_fn or self._default_scoring_fn
 
         retained_summary = summarize_retained_set(context)
         retained_hash = _hash(retained_summary)
@@ -114,7 +150,7 @@ class SequentialScorer(Scorer):
                 continue
 
             try:
-                result = self._scoring_fn(seg.content, retained_summary, self._task_goal)
+                result = scoring_fn(seg.content, retained_summary, self._task_goal)
                 if not self._validate_result(result):
                     logger.debug(
                         "sequential_scorer_invalid_result",
@@ -156,3 +192,38 @@ class SequentialScorer(Scorer):
         seg.staleness_score = scores["staleness_score"]
         seg.redundancy_score = scores["redundancy_score"]
         seg.composite_score = scores["composite_score"]
+
+    @staticmethod
+    def _default_scoring_fn(
+        segment_content: str,
+        retained_summary: str,
+        task_goal: str,
+    ) -> dict[str, float]:
+        """Default conditional backend used when no external LLM scorer is supplied.
+
+        This backend approximates task-conditioned marginal value with lexical
+        signals so `--scorer sequential` is functional out-of-the-box:
+          - relevance: overlap with task goal terms
+          - redundancy: overlap with retained-set terms
+          - staleness: neutral value (no recency clock in this interface)
+        """
+        seg_terms = _keywords(segment_content)
+        task_terms = _keywords(task_goal)
+        retained_terms = _keywords(retained_summary)
+
+        relevance = _overlap_ratio(seg_terms, task_terms) if task_terms else 0.5
+        redundancy = _overlap_ratio(seg_terms, retained_terms)
+        staleness = 0.5
+
+        composite = _clamp(
+            0.6 * relevance
+            + 0.3 * (1.0 - redundancy)
+            + 0.1 * staleness
+        )
+
+        return {
+            "relevance_score": _clamp(relevance),
+            "staleness_score": staleness,
+            "redundancy_score": _clamp(redundancy),
+            "composite_score": composite,
+        }

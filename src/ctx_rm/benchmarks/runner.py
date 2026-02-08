@@ -362,7 +362,10 @@ class BenchmarkRunner:
         if config.scorer == "sequential":
             from ctx_rm.core.scorer_sequential import SequentialScorer
 
-            return SequentialScorer(task_goal=self.task_id)
+            return SequentialScorer(
+                task_goal=self.task_id,
+                fallback=HeuristicScorer(source_weight=0.3),
+            )
         return HeuristicScorer()
 
     @staticmethod
@@ -708,7 +711,15 @@ class AgentLoopRunner:
         if config.scorer == "sequential":
             from ctx_rm.core.scorer_sequential import SequentialScorer
 
-            return SequentialScorer(task_goal=self.task_id)
+            fallback = (
+                HeuristicScorer(source_weight=0.3)
+                if self.mode == "ctx-rm"
+                else HeuristicScorer()
+            )
+            return SequentialScorer(
+                task_goal=self.task_id,
+                fallback=fallback,
+            )
         # Source-aware scoring for ctx-rm mode: needles score higher than noise
         if self.mode == "ctx-rm":
             return HeuristicScorer(source_weight=0.3)
