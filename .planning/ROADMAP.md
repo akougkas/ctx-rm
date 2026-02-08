@@ -42,9 +42,9 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 02-01-PLAN.md -- Heavyweight scenarios (SCALE-001/002/003 fixture creation, task YAML, evaluators) [wave 1]
-- [ ] 02-02-PLAN.md -- Scoring and recall improvements (per-source weights, content-based recall, recall budget, precision tracking) [wave 1]
-- [ ] 02-03-PLAN.md -- Budget calibration and admission tuning (calibrate all tasks, tune admission threshold from profiled file sizes) [wave 2, depends on 02-01]
+- [x] 02-01-PLAN.md -- Heavyweight scenarios (SCALE-001/002/003 fixture creation, task YAML, evaluators) [wave 1]
+- [x] 02-02-PLAN.md -- Scoring and recall improvements (per-source weights, content-based recall, recall budget, precision tracking) [wave 1]
+- [x] 02-03-PLAN.md -- Budget calibration and admission tuning (calibrate all tasks, tune admission threshold from profiled file sizes) [wave 2, depends on 02-01]
 
 ### Phase 3: Experiment Framework
 **Goal**: A single CLI command runs all experiment combinations and produces structured comparison output
@@ -57,7 +57,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 03-01: Experiment CLI command (YAML config, combination runner, aggregation, Rich table, CSV export)
+- [ ] 03-01-PLAN.md -- Experiment config model, combination runner, aggregation, Rich table, CSV export
 
 ### Phase 4: Evidence
 **Goal**: Reproducible data proves that ctx-rm eviction + recall outperforms naive context management on heavyweight workloads
@@ -83,6 +83,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Agent Hardening | 2/2 | ✓ Complete | 2026-02-08 |
-| 2. Scenarios & Accuracy | 0/3 | Not started | - |
+| 2. Scenarios & Accuracy | 3/3 | ✓ Complete | 2026-02-08 |
 | 3. Experiment Framework | 0/1 | Not started | - |
 | 4. Evidence | 0/2 | Not started | - |
