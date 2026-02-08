@@ -1,0 +1,421 @@
+ANNUAL HUMAN RESOURCES AND HEADCOUNT REPORT - FISCAL YEAR 2024
+================================================================
+
+Prepared by: Human Resources Division
+Distribution: Executive Leadership Team, Board of Directors
+Classification: Internal - Confidential
+Report Date: January 28, 2025
+
+EXECUTIVE SUMMARY
+-----------------
+
+Fiscal year 2024 was a year of strategic talent investment for the
+organization. The HR function supported the company's growth
+objectives by executing a carefully planned hiring program, enhancing
+employee development pathways, improving retention through targeted
+compensation adjustments, and strengthening the company culture
+during a period of significant growth and organizational change.
+
+The labor market environment remained competitive for technology
+talent throughout the year, though conditions moderated somewhat
+compared to the extreme tightness of prior years. The shift toward
+AI-related skills created new competitive dynamics in recruitment,
+as companies across all sectors aggressively recruited engineers
+and data scientists with AI/ML experience. Our ability to attract
+this talent was aided by our authentic AI product story and the
+opportunity for candidates to work on real AI systems at scale.
+
+ORGANIZATIONAL OVERVIEW
+------------------------
+
+The company is organized into five primary divisions:
+1. Engineering (including R&D, Platform, and AI)
+2. Sales and Marketing
+3. Customer Success and Support
+4. Operations (including Supply Chain, Logistics, and IT)
+5. General & Administrative (Finance, Legal, HR)
+
+Each division is led by a VP or SVP who reports to the CEO. The
+organizational structure remained stable during FY24, with one
+notable change: the creation of a dedicated AI Engineering group
+within the Engineering division, led by a newly hired VP of AI.
+
+HEADCOUNT SUMMARY
+------------------
+
+The organization's total headcount at fiscal year end reflects the
+deliberate hiring strategy executed throughout the year, balanced
+against natural attrition and targeted organizational adjustments.
+
+As of fiscal year end (December 31, 2024), the company employs
+247 employees across all divisions and geographies. This represents
+a net increase of 32 employees during the fiscal year, from a
+starting headcount of 215 at the beginning of FY24. The growth
+rate of 14.9% is aligned with the company's revenue growth rate
+and reflects investments in engineering capacity (particularly
+AI), sales coverage, and customer success capabilities.
+
+Headcount by division:
+- Engineering: 98 (40% of total)
+  - Platform engineering: 42
+  - AI engineering: 28
+  - Quality assurance: 15
+  - DevOps/SRE: 13
+- Sales and Marketing: 76 (31%)
+  - Sales (quota-carrying): 48
+  - Sales operations/enablement: 8
+  - Marketing: 28 (including demand gen, product marketing, events)  -- Note: this overlaps with separate Marketing report headcount as some marketing hires occurred in Q4
+- Customer Success: 32 (13%)
+  - Customer success managers: 18
+  - Technical support: 14
+- Operations: 22 (9%)
+  - Supply chain/logistics: 12
+  - IT: 6
+  - Facilities: 4
+- General & Administrative: 19 (8%)
+  - Finance: 8
+  - Legal: 4
+  - HR: 5
+  - Executive admin: 2
+
+HIRING ACTIVITY
+---------------
+
+Total new hires: 52
+Total departures: 20
+Net headcount change: +32
+
+Hiring by quarter:
+Q1: 12 hires
+Q2: 15 hires
+Q3: 13 hires
+Q4: 12 hires
+
+Hiring by division:
+- Engineering: 22 (42% of hires)
+- Sales and Marketing: 18 (35%)
+- Customer Success: 7 (13%)
+- Operations: 3 (6%)
+- G&A: 2 (4%)
+
+Key strategic hires during FY24:
+- VP of AI Engineering (Q1)
+- VP of Federal Sales (Q3)
+- Head of Partner Ecosystem (Q2)
+- VP of Product Marketing (Q3)
+- Director of Content Strategy (Q2)
+- 4 AI Solution Specialists (Q3-Q4)
+- 3 Senior Solutions Architects (Q3-Q4)
+
+Average time to fill:
+- Engineering roles: 62 days (industry average: 68)
+- Sales roles: 45 days
+- Support roles: 35 days
+- Executive roles: 95 days
+
+Offer acceptance rate: 82% (up from 76%)
+Sources of hire:
+- Employee referrals: 28%
+- LinkedIn recruiting: 25%
+- Direct applications: 22%
+- Agency recruiting: 15%
+- University recruiting: 10%
+
+ATTRITION AND RETENTION
+-------------------------
+
+Total departures: 20
+Voluntary departures: 14
+Involuntary departures: 6
+
+Annual voluntary attrition rate: 6.5% (down from 8.2%)
+Annual total attrition rate: 9.3%
+
+Departure analysis:
+- Average tenure of departing employees: 2.8 years
+- Department with highest attrition: Engineering (7.2%)
+- Department with lowest attrition: G&A (3.1%)
+- Regrettable departures: 8 (57% of voluntary)
+
+Top reasons for voluntary departure:
+1. Career advancement opportunity elsewhere: 36%
+2. Compensation/equity: 21%
+3. Work-life balance: 14%
+4. Relocation/personal: 14%
+5. Management relationship: 8%
+6. Other: 7%
+
+Retention initiatives deployed:
+- Spot bonus program for high-impact contributions
+- Career development paths published for all roles
+- Flexible work arrangement formalization
+- Manager training on retention conversations
+- Quarterly stay interviews for high-potential employees
+
+COMPENSATION AND BENEFITS
+--------------------------
+
+Compensation benchmarking was conducted in Q2 using data from
+Radford, Levels.fyi, and Glassdoor to ensure competitiveness:
+
+Median positioning: 65th percentile (target: 60th)
+Engineering compensation competitiveness: 70th percentile
+Sales OTE competitiveness: 62nd percentile
+
+Total compensation spend: $28.5M (up 19% from $23.9M)
+Components:
+- Base salaries: $21.8M (76%)
+- Variable/commission: $3.4M (12%)
+- Benefits: $2.1M (7%)
+- Equity/stock: $1.2M (4%)
+
+Benefits program:
+- Health insurance (medical, dental, vision): 100% employee, 75% dependent
+- 401(k) with 4% match
+- Unlimited PTO (tracked): average usage 22 days
+- Professional development budget: $2,000/employee/year
+- Home office stipend: $500 (one-time for remote employees)
+- Wellness program: gym membership subsidy
+- Employee assistance program (EAP)
+- Parental leave: 16 weeks primary, 8 weeks secondary
+
+EMPLOYEE ENGAGEMENT
+--------------------
+
+Annual engagement survey results (85% participation rate):
+- Overall engagement score: 78/100 (up from 74)
+- Manager effectiveness: 81/100
+- Career development satisfaction: 72/100
+- Compensation satisfaction: 68/100
+- Work-life balance: 76/100
+- Company direction/strategy: 82/100
+
+Key improvements from FY23:
+- Career development: +6 points (new career paths published)
+- Company direction: +5 points (improved communication cadence)
+- Manager effectiveness: +3 points (manager training program)
+
+Areas for improvement:
+- Compensation satisfaction (68/100) -- below benchmark
+- Cross-team collaboration (71/100) -- silos identified
+- Recognition frequency (70/100) -- implementing new program
+
+Employee Net Promoter Score (eNPS): 38 (up from 32)
+Glassdoor rating: 4.2/5.0 (up from 3.9)
+
+LEARNING AND DEVELOPMENT
+--------------------------
+
+Training investment: $494K ($2,000 budget x 247 employees)
+Training utilization rate: 78% of budget consumed
+Average training hours per employee: 32
+
+Key programs:
+1. New hire onboarding (40 hours, 100% completion)
+2. Manager development program (16 participants)
+3. Technical skills bootcamps (AI/ML, cloud, security)
+4. Sales methodology training (Sandler, quarterly)
+5. Leadership development for individual contributors
+6. DEI awareness and inclusive leadership
+
+Internal promotions: 18 (7.3% promotion rate)
+Internal mobility (lateral moves): 8
+
+DIVERSITY, EQUITY, AND INCLUSION
+-----------------------------------
+
+Workforce demographics (self-reported):
+Gender:
+- Male: 58%
+- Female: 38%
+- Non-binary/other: 3%
+- Prefer not to say: 1%
+
+Engineering gender breakdown:
+- Male: 68%
+- Female: 28%
+- Non-binary/other: 4%
+
+Leadership (VP+) gender breakdown:
+- Male: 55%
+- Female: 45%
+
+Ethnicity (US employees only):
+- White: 52%
+- Asian: 24%
+- Hispanic/Latino: 10%
+- Black/African American: 8%
+- Two or more races: 4%
+- Other/prefer not to say: 2%
+
+DEI initiatives:
+- Inclusive hiring training for all interviewers
+- Employee resource groups (ERGs): 4 active
+- Partnership with diverse talent pipelines
+- Pay equity audit (completed Q3, minor adjustments made)
+- Mentorship program (32 active pairs)
+
+REMOTE AND HYBRID WORK
+------------------------
+
+Work arrangement distribution:
+- Hybrid (2-3 days in office): 55%
+- Fully remote: 30%
+- Fully in-office: 15%
+
+Office locations:
+- Headquarters: San Francisco, CA (120 seats)
+- Engineering hub: Portland, OR (45 seats)
+- Sales office: New York, NY (25 seats)
+- International: London, UK (15 seats)
+
+Remote work observations:
+- Productivity metrics stable or improved across functions
+- Engagement scores comparable between remote and hybrid
+- Collaboration tools investment: $180K/year
+- Travel budget for team gatherings: $95K/year
+- Home office equipment stipend utilized by 92% of eligible
+
+WORKPLACE SAFETY AND COMPLIANCE
+----------------------------------
+
+Workplace incidents: 0 reportable incidents
+OSHA compliance: Full compliance, no citations
+Workers compensation claims: 2 (minor ergonomic issues)
+Background check compliance: 100% of new hires screened
+I-9 compliance: 100% verified and documented
+Harassment training: 100% completion rate (annual requirement)
+
+FISCAL YEAR 2025 HR PRIORITIES
+---------------------------------
+
+1. Hire 45-55 new employees to support growth plan
+2. Implement new HRIS platform (Workday migration from BambooHR)
+3. Launch formalized career framework with levels and bands
+4. Achieve top-quartile engagement scores (target: 82/100)
+5. Reduce voluntary attrition to below 6%
+6. Expand DEI programs with measurable inclusion metrics
+7. Launch AI-powered internal mobility platform
+8. Implement continuous feedback system (quarterly cycles)
+
+APPENDIX: QUARTERLY HEADCOUNT
+-------------------------------
+
+Q1 start: 215 → Q1 end: 227 (+12 hires, -0 departures)
+Q2 start: 227 → Q2 end: 237 (+15 hires, -5 departures)
+Q3 start: 237 → Q3 end: 243 (+13 hires, -7 departures)
+Q4 start: 243 → Q4 end: 247 (+12 hires, -8 departures)
+
+APPENDIX B: DETAILED COMPENSATION ANALYSIS
+---------------------------------------------
+
+Compensation by level (median base salary):
+- Individual Contributor L1 (Entry): $72K
+- Individual Contributor L2 (Mid): $95K
+- Individual Contributor L3 (Senior): $125K
+- Individual Contributor L4 (Staff): $155K
+- Individual Contributor L5 (Principal): $185K
+- Manager M1 (First-line): $135K
+- Manager M2 (Senior Manager): $160K
+- Director: $185K
+- Vice President: $220K
+- Senior Vice President: $260K
+- C-Level: $320K
+
+Total base salary expense by division:
+- Engineering: $10.2M (average $104K/person)
+- Sales: $3.8M (average $79K base, excludes commission)
+- Marketing: $2.6M (average $93K/person)
+- Customer Success: $2.4M (average $75K/person)
+- Operations: $1.6M (average $73K/person)
+- G&A: $1.2M (average $63K/person)
+
+Commission and bonus detail:
+- Sales commission earned: $2.2M
+- Sales bonus (quarterly accelerators): $0.4M
+- Engineering performance bonus: $0.3M
+- Company-wide holiday bonus: $0.15M
+- Spot bonuses: $0.12M
+- Referral bonuses: $0.08M
+
+Equity compensation:
+- Stock options granted in FY24: 850,000 shares
+- Weighted average exercise price: $2.40
+- Vesting schedule: 4-year with 1-year cliff
+- Employees with unvested equity: 82%
+- Options exercised in FY24: 120,000 shares
+
+APPENDIX C: RECRUITING PIPELINE ANALYSIS
+------------------------------------------
+
+Recruiting funnel metrics:
+- Applications received: 8,400
+- Recruiter screens: 2,100 (25% of applications)
+- Phone interviews: 840 (40% of screens)
+- On-site/virtual interviews: 320 (38% of phones)
+- Offers extended: 64 (20% of on-sites)
+- Offers accepted: 52 (82% acceptance rate)
+
+Source effectiveness:
+Employee referrals:
+- Applications: 420 (5% of total)
+- Hires: 15 (28% of hires)
+- Quality score: 4.5/5.0
+- Cost per hire: $2,500 (referral bonus only)
+- Time to fill: 38 days
+
+LinkedIn recruiting:
+- Applications/sourced: 1,680
+- Hires: 13 (25% of hires)
+- Quality score: 4.2/5.0
+- Cost per hire: $4,800 (recruiter license + time)
+- Time to fill: 52 days
+
+Direct applications (website/job boards):
+- Applications: 3,360
+- Hires: 11 (22% of hires)
+- Quality score: 3.8/5.0
+- Cost per hire: $1,200
+- Time to fill: 48 days
+
+Agency recruiting:
+- Applications: 840
+- Hires: 8 (15% of hires)
+- Quality score: 4.3/5.0
+- Cost per hire: $18,500 (20% of first-year salary)
+- Time to fill: 42 days
+
+University recruiting:
+- Applications: 1,260
+- Hires: 5 (10% of hires)
+- Quality score: 3.9/5.0
+- Cost per hire: $3,200 (career fair + travel)
+- Time to fill: 62 days
+
+APPENDIX D: EMPLOYEE WELLBEING PROGRAMS
+-----------------------------------------
+
+Employee Assistance Program (EAP) utilization:
+- Total EAP sessions: 280
+- Utilization rate: 18% of employees
+- Top categories: Stress management (35%), work-life balance (25%),
+  financial wellness (20%), relationship support (15%), other (5%)
+- Satisfaction with EAP: 4.2/5.0
+
+Wellness program participation:
+- Gym membership subsidy utilized: 55% of eligible
+- Health screening participation: 62%
+- Mental health awareness workshop: 85% attendance
+- Ergonomic assessment requests: 42
+- Walking challenge participation: 120 employees
+
+Paid time off usage:
+- Average PTO days used: 22 days (unlimited policy)
+- Employees using <10 days: 12% (flagged for manager attention)
+- Employees using >30 days: 5%
+- Parental leave taken: 8 employees (average 14 weeks)
+- Bereavement leave: 6 instances
+- Jury duty: 3 instances
+
+---
+End of Annual Human Resources and Headcount Report
