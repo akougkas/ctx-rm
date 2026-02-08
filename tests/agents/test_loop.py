@@ -509,3 +509,164 @@ async def test_recall_disabled_by_default(tmp_path) -> None:
     if needle_id not in active_ids:
         assert needle.recalled_at is None, "Recall should not fire when disabled"
     assert result.recalls_made == 0
+
+
+# ── LOOP-02: Done tool termination ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_done_tool_terminates_loop(tmp_path) -> None:
+    """When driver returns a done tool call, loop terminates with structured output."""
+    bus = _bus()
+    driver = MockDriver([
+        _tool("done", {"summary": "Task complete", "files_changed": ["output.py"]}),
+    ])
+    loop = AgentLoop(driver=driver, bus=bus, working_dir=str(tmp_path))
+
+    result = await loop.run("You are helpful.", "Do the task")
+
+    assert result.turns == 1
+    assert result.final_response is not None
+    assert "Task complete" in result.final_response
+    assert "output.py" in result.final_response
+
+
+@pytest.mark.asyncio
+async def test_done_tool_among_other_tools(tmp_path) -> None:
+    """Done tool coexists with other tool calls; all execute, then loop stops."""
+    (tmp_path / "readme.txt").write_text("hello")
+    bus = _bus()
+    multi = ChatResponse(
+        content=None,
+        tool_calls=[
+            ToolCall(id="c0", name="file_read",
+                     arguments={"path": str(tmp_path / "readme.txt")}),
+            ToolCall(id="c1", name="done",
+                     arguments={"summary": "Read and done", "files_changed": []}),
+        ],
+        prompt_tokens=50, completion_tokens=10, total_tokens=60,
+    )
+    driver = MockDriver([multi])
+    loop = AgentLoop(driver=driver, bus=bus, working_dir=str(tmp_path))
+
+    result = await loop.run("sys", "task")
+
+    # file_read executed (tool_calls_made includes both)
+    assert result.tool_calls_made == 2
+    # Loop terminated after this single turn (no second turn)
+    assert result.turns == 1
+    assert result.final_response is not None
+    assert "Read and done" in result.final_response
+
+
+@pytest.mark.asyncio
+async def test_loop_still_terminates_on_text(tmp_path) -> None:
+    """Backward compat: text-only response (no tool calls, no done) still terminates."""
+    bus = _bus()
+    driver = MockDriver([_text("I'm done with everything")])
+    loop = AgentLoop(driver=driver, bus=bus, working_dir=str(tmp_path))
+
+    result = await loop.run("sys", "task")
+
+    assert result.final_response == "I'm done with everything"
+    assert result.turns == 1
+    assert result.tool_calls_made == 0
+
+
+# ── LOOP-03: Turn logging ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_turn_logging_emits_events(tmp_path) -> None:
+    """on_progress callback receives turn_start, tool_call, turn_end with token info."""
+    (tmp_path / "f.txt").write_text("data")
+    bus = _bus()
+    driver = MockDriver([
+        _tool("file_read", {"path": str(tmp_path / "f.txt")}, call_id="c0"),
+        _text("Got it"),
+    ])
+    events: list[tuple[str, dict]] = []
+
+    def capture(event: str, data: dict) -> None:
+        events.append((event, data))
+
+    loop = AgentLoop(
+        driver=driver, bus=bus, working_dir=str(tmp_path), on_progress=capture,
+    )
+
+    await loop.run("sys", "read")
+
+    event_names = [e[0] for e in events]
+    # Turn 1 (tool call): turn_start, tool_call, turn_end
+    # Turn 2 (text): turn_start, turn_end
+    assert "turn_start" in event_names
+    assert "tool_call" in event_names
+    assert "turn_end" in event_names
+
+    # turn_end events must include token counts
+    turn_ends = [e[1] for e in events if e[0] == "turn_end"]
+    assert len(turn_ends) >= 1
+    for te in turn_ends:
+        assert "prompt_tokens" in te
+        assert "completion_tokens" in te
+
+
+# ── LOOP-04: Failure hints ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_failure_hint_after_consecutive_errors(tmp_path) -> None:
+    """After 3 consecutive failed tool calls, a hint message is injected."""
+    bus = _bus()
+    # 4 turns of reading a nonexistent file (will error), then text to terminate
+    driver = MockDriver([
+        _tool("file_read", {"path": str(tmp_path / "nope1.txt")}, call_id="c0"),
+        _tool("file_read", {"path": str(tmp_path / "nope2.txt")}, call_id="c1"),
+        _tool("file_read", {"path": str(tmp_path / "nope3.txt")}, call_id="c2"),
+        _tool("file_read", {"path": str(tmp_path / "nope4.txt")}, call_id="c3"),
+        _text("Giving up"),
+    ])
+    loop = AgentLoop(driver=driver, bus=bus, working_dir=str(tmp_path))
+
+    await loop.run("sys", "read files")
+
+    # After 3 failures (turns 1-3), on turn 4 the messages should contain a hint
+    # The hint is injected before the 4th driver.chat call (after 3 consecutive errors)
+    # Check the messages sent to driver on 4th call (index 3)
+    assert len(driver.call_log) >= 4
+    fourth_call_msgs = driver.call_log[3]["messages"]
+    hint_msgs = [
+        m for m in fourth_call_msgs
+        if m["role"] == "user" and "consecutive" in m.get("content", "").lower()
+    ]
+    assert len(hint_msgs) >= 1, (
+        "Hint message should be injected after 3 consecutive failures"
+    )
+
+
+@pytest.mark.asyncio
+async def test_failure_counter_resets_on_success(tmp_path) -> None:
+    """Failure counter resets after a successful tool call; no hint injected."""
+    (tmp_path / "real.txt").write_text("exists")
+    bus = _bus()
+    # 2 failures, 1 success (resets counter), 2 more failures, then text
+    driver = MockDriver([
+        _tool("file_read", {"path": str(tmp_path / "bad1.txt")}, call_id="c0"),
+        _tool("file_read", {"path": str(tmp_path / "bad2.txt")}, call_id="c1"),
+        _tool("file_read", {"path": str(tmp_path / "real.txt")}, call_id="c2"),
+        _tool("file_read", {"path": str(tmp_path / "bad3.txt")}, call_id="c3"),
+        _tool("file_read", {"path": str(tmp_path / "bad4.txt")}, call_id="c4"),
+        _text("Done"),
+    ])
+    loop = AgentLoop(driver=driver, bus=bus, working_dir=str(tmp_path))
+
+    await loop.run("sys", "read files")
+
+    # No hint should have been injected because counter reset at turn 3
+    for call in driver.call_log:
+        for msg in call["messages"]:
+            if msg["role"] == "user":
+                content = msg.get("content", "").lower()
+                assert "consecutive" not in content or "try a different approach" not in content, (
+                    "No hint should be injected when counter resets before threshold"
+                )
