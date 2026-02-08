@@ -1,0 +1,10 @@
+name: eviction-accuracy
+output_dir: ./results/experiments/eviction-accuracy
+runs: 3
+max_turns: 30
+tasks: [SCALE-001, SCALE-002, SCALE-003]
+modes: [ctx-rm]
+policies: [budget, lru]
+budgets: []
+scorer: heuristic
+enable_recall: false

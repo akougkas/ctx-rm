@@ -47,6 +47,7 @@ class EvictionEvent:
     age_seconds: float
     idle_seconds: float
     composite_score: float | None
+    source: str | None = None
 
 
 @dataclass
@@ -113,6 +114,7 @@ class MetricsCollector:
                 age_seconds=seg.age_seconds,
                 idle_seconds=seg.idle_seconds,
                 composite_score=seg.composite_score,
+                source=seg.source,
             ))
 
     def record_recall(self, seg: Segment) -> None:

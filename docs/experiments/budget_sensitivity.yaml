@@ -1,0 +1,10 @@
+name: budget-sensitivity
+output_dir: ./results/experiments/budget-sensitivity
+runs: 3
+max_turns: 30
+tasks: [SPEC-001]
+modes: [ctx-rm, full]
+policies: [budget]
+budgets: [500, 1000, 2000, 4000, 8000, 16000, 32000, 64000, 100000]
+scorer: heuristic
+enable_recall: true

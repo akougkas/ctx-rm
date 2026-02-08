@@ -1,0 +1,10 @@
+name: recall-effectiveness-off
+output_dir: ./results/experiments/recall-effectiveness-off
+runs: 3
+max_turns: 30
+tasks: [SCALE-003]
+modes: [ctx-rm, full]
+policies: [budget]
+budgets: []
+scorer: heuristic
+enable_recall: false
