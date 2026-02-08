@@ -697,3 +697,146 @@ def compare(
         console.print(summary)
     console.print()
 
+
+# ── experiment ──────────────────────────────────────────────────────────────
+
+
+@app.command()
+def experiment(
+    config_path: Annotated[Path, typer.Argument(help="YAML experiment config file.")],
+    dry_run: Annotated[bool, typer.Option(
+        "--dry-run", help="Show combinations without running.",
+    )] = False,
+) -> None:
+    """Run a multi-combination experiment from a YAML config.
+
+    Usage:  ctx-rm experiment config.yaml
+    Dry run: ctx-rm experiment config.yaml --dry-run
+    """
+    _quiet_logs()
+
+    from ctx_rm.benchmarks.experiment import (
+        AggregatedResult,
+        ExperimentConfig,
+        ExperimentRunner,
+        generate_combinations,
+        write_csv,
+    )
+
+    config = ExperimentConfig.from_yaml(config_path)
+    combos = generate_combinations(config)
+
+    console.print()
+    console.print(
+        f"  [bold]{config.name}[/bold]  "
+        f"{len(config.tasks)} tasks x {len(config.modes)} modes  "
+        f"{len(combos)} combinations  "
+        f"{config.runs} run(s) each"
+    )
+    console.print()
+
+    if dry_run:
+        _print_dry_run_table(combos)
+        return
+
+    def _on_progress(current: int, total: int, combo: Any) -> None:
+        console.print(
+            f"  [{current}/{total}]  {combo.task_id}  {combo.mode}  "
+            f"policy={combo.policy or '--'}  budget={combo.budget}  "
+            f"run={combo.run_index}"
+        )
+
+    runner = ExperimentRunner(config)
+    results = asyncio.run(runner.run_all(on_progress=_on_progress))
+
+    aggregated = ExperimentRunner.aggregate(results)
+    _print_experiment_table(aggregated)
+
+    output_dir = Path(config.output_dir)
+    csv_path = output_dir / f"{config.name}.csv"
+    write_csv(aggregated, csv_path)
+    console.print(f"\n  CSV exported: [dim]{csv_path}[/dim]\n")
+
+
+def _print_dry_run_table(combos: list) -> None:
+    """Print a Rich table of planned experiment combinations."""
+    table = Table(
+        title="Experiment Combinations (dry run)",
+        show_lines=False,
+        title_style="bold",
+        header_style="bold cyan",
+        border_style="dim",
+    )
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Task", style="bold")
+    table.add_column("Mode")
+    table.add_column("Policy")
+    table.add_column("Budget", justify="right")
+    table.add_column("Run", justify="right", style="dim")
+
+    for i, c in enumerate(combos, 1):
+        budget_display = str(c.budget) if c.budget > 0 else "auto"
+        table.add_row(
+            str(i),
+            c.task_id,
+            c.mode,
+            c.policy or "--",
+            budget_display,
+            str(c.run_index),
+        )
+
+    console.print(table)
+    console.print(f"\n  [dim]{len(combos)} combinations. Remove --dry-run to execute.[/dim]\n")
+
+
+def _print_experiment_table(aggregated: list) -> None:
+    """Print a Rich table of aggregated experiment results."""
+    table = Table(
+        title="Experiment Results",
+        show_lines=False,
+        title_style="bold",
+        header_style="bold cyan",
+        border_style="dim",
+    )
+    table.add_column("Task", style="bold")
+    table.add_column("Mode")
+    table.add_column("Policy")
+    table.add_column("Budget", justify="right")
+    table.add_column("Med Tokens", justify="right", style="dim")
+    table.add_column("Pass Rate", justify="center")
+    table.add_column("Med Evictions", justify="right")
+    table.add_column("Med Recalls", justify="right")
+    table.add_column("Runs", justify="right", style="dim")
+    table.add_column("Errors", justify="right")
+
+    for a in aggregated:
+        # Color-code pass rate
+        if a.pass_rate >= 1.0:
+            rate_display = f"[bold green]{a.pass_rate:.0%}[/bold green]"
+        elif a.pass_rate > 0:
+            rate_display = f"[yellow]{a.pass_rate:.0%}[/yellow]"
+        else:
+            rate_display = f"[bold red]{a.pass_rate:.0%}[/bold red]"
+
+        error_display = (
+            f"[red]{a.num_errors}[/red]" if a.num_errors > 0 else "[dim]0[/dim]"
+        )
+
+        budget_display = str(a.budget) if a.budget > 0 else "auto"
+
+        table.add_row(
+            a.task_id,
+            a.mode,
+            a.policy or "--",
+            budget_display,
+            f"{a.median_prompt_tokens:,.0f}",
+            rate_display,
+            f"{a.median_eviction_count:.0f}",
+            f"{a.median_recall_count:.0f}",
+            str(a.num_runs),
+            error_display,
+        )
+
+    console.print()
+    console.print(table)
+

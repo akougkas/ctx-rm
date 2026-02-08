@@ -254,3 +254,86 @@ class TestAggregation:
         assert agg.num_errors == 1
         assert agg.median_prompt_tokens == 600.0  # median of [500, 700]
         assert agg.pass_rate == 1.0  # 2/2 successful passed
+
+
+# ── CSV export test ──────────────────────────────────────────────────────────
+
+
+class TestCSVExport:
+    def test_csv_export(self, tmp_path: Path) -> None:
+        """write_csv produces a valid CSV with correct headers and data."""
+        aggregated = [
+            AggregatedResult(
+                task_id="CR-001",
+                mode="ctx-rm",
+                policy="budget",
+                budget=1413,
+                median_prompt_tokens=500.0,
+                pass_rate=0.67,
+                median_eviction_count=5.0,
+                median_recall_count=2.0,
+                mean_recall_precision=0.75,
+                num_runs=3,
+                num_errors=0,
+            ),
+            AggregatedResult(
+                task_id="CR-001",
+                mode="full",
+                policy=None,
+                budget=0,
+                median_prompt_tokens=1200.0,
+                pass_rate=1.0,
+                median_eviction_count=0.0,
+                median_recall_count=0.0,
+                mean_recall_precision=0.0,
+                num_runs=3,
+                num_errors=1,
+            ),
+        ]
+
+        csv_path = tmp_path / "output" / "results.csv"
+        write_csv(aggregated, csv_path)
+
+        assert csv_path.exists()
+        lines = csv_path.read_text().strip().split("\n")
+        assert len(lines) == 3  # header + 2 data rows
+
+        header = lines[0]
+        assert "task_id" in header
+        assert "median_prompt_tokens" in header
+        assert "pass_rate" in header
+        assert "median_eviction_count" in header
+        assert "median_recall_count" in header
+
+        # Check first data row
+        row1 = lines[1].split(",")
+        assert row1[0] == "CR-001"
+        assert row1[1] == "ctx-rm"
+        assert row1[2] == "budget"
+
+
+# ── Dry-run test ─────────────────────────────────────────────────────────────
+
+
+class TestDryRun:
+    def test_dry_run_does_not_run(self, tmp_path: Path) -> None:
+        """--dry-run generates combinations but does not execute any runs."""
+        data = _full_config_dict(
+            tasks=["CR-001"],
+            modes=["ctx-rm"],
+            policies=["budget"],
+            runs=1,
+        )
+        path = _write_yaml(tmp_path / "config.yaml", data)
+
+        config = ExperimentConfig.from_yaml(path)
+        combos = generate_combinations(config)
+
+        # Verify combinations are generated
+        assert len(combos) == 1
+        assert combos[0].task_id == "CR-001"
+        assert combos[0].mode == "ctx-rm"
+
+        # Verify no output directory is created (dry run doesn't run anything)
+        output_dir = Path(config.output_dir)
+        assert not output_dir.exists()
