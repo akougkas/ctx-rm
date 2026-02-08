@@ -66,6 +66,7 @@ class Policy(StrEnum):
 class ScorerChoice(StrEnum):
     heuristic = "heuristic"
     ollama = "ollama"
+    sequential = "sequential"
 
 
 # ── info ─────────────────────────────────────────────────────────────────────

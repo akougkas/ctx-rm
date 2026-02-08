@@ -51,7 +51,7 @@ class CtxRmConfig(BaseSettings):
     llama_timeout: float = Field(default=120.0, description="LlamaCpp request timeout in seconds")
 
     # LLM Scoring (opt-in)
-    scorer: str = Field(default="heuristic", description="Scorer: heuristic or ollama")
+    scorer: str = Field(default="heuristic", description="Scorer: heuristic, ollama, or sequential")
     ollama_host: str = Field(
         default="http://localhost:11434", description="Ollama API host"
     )

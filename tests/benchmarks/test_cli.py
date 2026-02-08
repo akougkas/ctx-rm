@@ -130,6 +130,28 @@ def test_bench_accepts_policy_and_scorer(mock_runner_cls: MagicMock) -> None:
 
 
 @patch("ctx_rm.benchmarks.runner.BenchmarkRunner")
+def test_bench_accepts_sequential_scorer(mock_runner_cls: MagicMock) -> None:
+    """bench accepts --scorer sequential."""
+    import os
+
+    mock_instance = MagicMock()
+    mock_instance.run = AsyncMock()
+    mock_runner_cls.return_value = mock_instance
+
+    old_scorer = os.environ.get("CTX_RM_SCORER")
+    try:
+        result = runner.invoke(app, [
+            "bench", "--task", "CR-001", "--scorer", "sequential",
+        ])
+        assert result.exit_code == 0, result.output
+    finally:
+        if old_scorer is None:
+            os.environ.pop("CTX_RM_SCORER", None)
+        else:
+            os.environ["CTX_RM_SCORER"] = old_scorer
+
+
+@patch("ctx_rm.benchmarks.runner.BenchmarkRunner")
 def test_bench_rejects_invalid_mode(mock_runner_cls: MagicMock) -> None:
     """Invalid mode value is rejected by the enum."""
     result = runner.invoke(app, ["bench", "--mode", "invalid"])

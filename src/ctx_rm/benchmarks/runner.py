@@ -359,6 +359,10 @@ class BenchmarkRunner:
                 max_concurrent=config.ollama_max_concurrent,
                 task_goal=self.task_id,
             )
+        if config.scorer == "sequential":
+            from ctx_rm.core.scorer_sequential import SequentialScorer
+
+            return SequentialScorer(task_goal=self.task_id)
         return HeuristicScorer()
 
     @staticmethod
@@ -701,6 +705,10 @@ class AgentLoopRunner:
                 max_concurrent=config.ollama_max_concurrent,
                 task_goal=self.task_id,
             )
+        if config.scorer == "sequential":
+            from ctx_rm.core.scorer_sequential import SequentialScorer
+
+            return SequentialScorer(task_goal=self.task_id)
         # Source-aware scoring for ctx-rm mode: needles score higher than noise
         if self.mode == "ctx-rm":
             return HeuristicScorer(source_weight=0.3)
