@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-08)
 
 **Core value:** An agent running with ctx-rm can process workloads exceeding its context window without accuracy degradation, proven by reproducible benchmarks.
-**Current focus:** Phase 4 - Results Analysis (next)
+**Current focus:** Phase 4 - Evidence (in progress)
 
 ## Current Position
 
-Phase: 3 of 4 (Experiment Framework)
-Plan: 1 of 1 in current phase
-Status: Phase complete
-Last activity: 2026-02-08 -- Completed 03-01 (Experiment Framework), Phase 3 done
+Phase: 4 of 4 (Evidence)
+Plan: 1 of 2 in current phase
+Status: In progress
+Last activity: 2026-02-08 -- Completed 04-01 (Evidence Telemetry & Analyzer)
 
-Progress: [████████░░] 75%
+Progress: [█████████░] 88%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 6
-- Average duration: 10 min
-- Total execution time: 62 min
+- Total plans completed: 7
+- Average duration: 9 min
+- Total execution time: 65 min
 
 **By Phase:**
 
@@ -30,10 +30,11 @@ Progress: [████████░░] 75%
 | 01-agent-hardening | 2 | 7 min | 3.5 min |
 | 02-scenarios-accuracy | 3 | 52 min | 17.3 min |
 | 03-experiment-framework | 1 | 3 min | 3.0 min |
+| 04-evidence | 1 | 3 min | 3.0 min |
 
 **Recent Trend:**
-- Last 5 plans: 02-02 (3 min), 02-01 (34 min), 02-03 (15 min), 03-01 (3 min)
-- Trend: Phase 3 was a single focused plan, executed quickly
+- Last 5 plans: 02-01 (34 min), 02-03 (15 min), 03-01 (3 min), 04-01 (3 min)
+- Trend: Consistent fast execution on focused plans
 
 *Updated after each plan completion*
 
@@ -66,6 +67,8 @@ Recent decisions affecting current work:
 - Non-ctx-rm modes deduplicated in experiment combinations: policy/budget only expand for ctx-rm -- from 03-01
 - budget=0 in RunConfig signals auto-select from BUDGET_MAP at runtime -- from 03-01
 - Aggregation excludes errored runs from stats but counts them in num_errors -- from 03-01
+- EvictionEvent.source tracks seg.source for post-hoc noise vs needle analysis -- from 04-01
+- Analyzer walks result directory tree; structure mirrors BenchmarkRunner._result_dir output -- from 04-01
 
 ### Pending Todos
 
@@ -79,5 +82,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-08
-Stopped at: Phase 3 complete (1 plan done). Ready for Phase 4.
-Resume file: .planning/ROADMAP.md (Phase 4: Results Analysis)
+Stopped at: Phase 4, plan 1 of 2 complete. Next: 04-02 (Evidence Collection & Report).
+Resume file: .planning/phases/04-evidence/04-02-PLAN.md
