@@ -5,8 +5,10 @@ from pathlib import Path
 import pytest
 
 from ctx_rm.benchmarks.experiment_loader import ExperimentLoader
+from ctx_rm.benchmarks.loader import TaskLoader
 
 YAML_PATH = Path("docs/experiments/infmem_comparison.yaml")
+TASKS_YAML_PATH = Path("docs/context_removal_benchmark_tasks.yaml")
 
 
 @pytest.fixture
@@ -40,3 +42,16 @@ def test_get_experiment_missing(loader: ExperimentLoader) -> None:
     with pytest.raises(ValueError, match="EXP-DOES-NOT-EXIST"):
         loader.get_experiment("EXP-DOES-NOT-EXIST")
 
+
+def test_all_experiment_tasks_exist_in_task_catalog(loader: ExperimentLoader) -> None:
+    """All task IDs in the experiment matrix must exist in benchmark tasks YAML."""
+    suite = loader.load()
+    known_task_ids = set(TaskLoader(TASKS_YAML_PATH).list_task_ids())
+
+    missing: list[tuple[str, str]] = []
+    for experiment in suite.experiments:
+        for task_id in experiment.tasks:
+            if task_id not in known_task_ids:
+                missing.append((experiment.id, task_id))
+
+    assert not missing, f"Unknown task IDs in experiment matrix: {missing}"
