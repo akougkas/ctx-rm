@@ -145,7 +145,7 @@ class BenchmarkRunner:
 
         driver = driver_factory() if driver_factory is not None else self._create_driver()
 
-        bus = self._create_bus()
+        bus = self._create_bus(metrics=metrics)
         self._last_bus = bus
 
         self._inject_context(bus, task)
@@ -153,13 +153,26 @@ class BenchmarkRunner:
         system_prompt = self._build_system_prompt(task)
         task_instruction = self._build_task_instruction(task, working_copy)
 
+        # Wrap loop event callback to also update metrics per turn
+        def _loop_event_with_metrics(event: str, data: dict) -> None:
+            if event == "turn_start":
+                metrics.set_turn(data.get("turn", 0))
+                metrics.take_snapshot(bus.get_stats())
+            elif event == "turn_end":
+                metrics.record_agent_response({
+                    "prompt_tokens": data.get("prompt_tokens", 0),
+                    "completion_tokens": data.get("completion_tokens", 0),
+                })
+            if self._on_loop_event:
+                self._on_loop_event(event, data)
+
         loop = AgentLoop(
             driver=driver,
             bus=bus,
             working_dir=str(working_copy),
             max_turns=self.max_turns,
             enable_recall=self.enable_recall,
-            on_progress=self._on_loop_event,
+            on_progress=_loop_event_with_metrics,
         )
 
         result = await loop.run(system_prompt, task_instruction)
@@ -167,11 +180,16 @@ class BenchmarkRunner:
         evaluator = Evaluator(working_copy)
         eval_result = evaluator.evaluate_task(self.task_id, task.evaluation)
 
+        # Final snapshot
+        metrics.set_turn(result.turns)
         metrics.take_snapshot(bus.get_stats())
         metrics.export_json(result_dir / "metrics.json")
 
         eval_data = {
             "task_id": eval_result.task_id,
+            "mode": self.mode,
+            "policy": self.policy_name if self.mode == "ctx-rm" else None,
+            "budget": self.token_budget,
             "all_passed": eval_result.all_passed,
             "summary": eval_result.summary,
             "checks": [
@@ -277,7 +295,7 @@ class BenchmarkRunner:
 
     # ── Bus creation ───────────────────────────────────────────────────
 
-    def _create_bus(self) -> ContextBus:
+    def _create_bus(self, metrics: MetricsCollector | None = None) -> ContextBus:
         from ctx_rm.core.embedding import HashingEmbeddingProvider
 
         budget = self._resolve_budget()
@@ -296,6 +314,7 @@ class BenchmarkRunner:
             store=store,
             policy=policy,
             scorer=scorer,
+            metrics=metrics,
             eviction_batch_mode=config.eviction_batch_mode,
             adaptive_single_evict_max_utilization=config.adaptive_single_evict_max_utilization,
             admission_threshold=ADMISSION_THRESHOLD,
@@ -361,9 +380,11 @@ class BenchmarkRunner:
 
     def _result_dir(self) -> Path:
         if self.mode == "ctx-rm":
+            # Include budget in path to prevent different budget levels
+            # from overwriting each other in budget-sweep experiments.
             return (
                 self.output_dir / self.task_id / "ctx-rm" / self.driver_name
-                / self.policy_name / f"run-{self.run_index}"
+                / self.policy_name / f"b{self.token_budget}" / f"run-{self.run_index}"
             )
         return (
             self.output_dir / self.task_id / self.mode / self.driver_name

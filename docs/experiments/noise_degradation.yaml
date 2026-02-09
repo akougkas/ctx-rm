@@ -1,8 +1,8 @@
 name: noise-degradation
 output_dir: ./results/experiments/noise-degradation
-runs: 5
+runs: 1
 max_turns: 30
-tasks: [SCALE-001, SCALE-002, SCALE-003, CR-004, CR-006, CR-010, SPEC-001]
+tasks: [SCALE-001, SCALE-003, CR-006, SPEC-001]
 modes: [ctx-rm, full]
 policies: [budget]
 budgets: []

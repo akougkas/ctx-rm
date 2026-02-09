@@ -268,6 +268,14 @@ def bench(
     if live:
         from ctx_rm.cli.tui import TuiDashboard
 
+        # Suppress structlog to avoid stomping over the Rich Live display
+        import logging
+        import structlog
+        logging.getLogger("ctx_rm").setLevel(logging.WARNING)
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
+        )
+
         tui = TuiDashboard(task_id=task, mode=mode.value, budget=budget)
         tui.set_max_turns(max_turns)
         tui.start()
@@ -290,10 +298,14 @@ def bench(
     finally:
         if tui is not None:
             tui.stop()
+            # Restore structlog
+            structlog.configure(
+                wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
+            )
 
-    # Show post-run summary
+    # Show post-run summary — path must match runner._result_dir()
     if mode == Mode.ctx_rm:
-        result_dir = output / task / "ctx-rm" / "llamacpp" / policy.value / f"run-{run_index}"
+        result_dir = output / task / "ctx-rm" / "llamacpp" / policy.value / f"b{budget}" / f"run-{run_index}"
     else:
         result_dir = output / task / mode.value / "llamacpp" / f"run-{run_index}"
 

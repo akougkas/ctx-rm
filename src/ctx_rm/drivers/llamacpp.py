@@ -70,7 +70,7 @@ class LlamaCppDriver:
         base_url: str = "http://192.168.86.141:8080",
         temperature: float = 0.3,
         max_tokens: int = 4096,
-        timeout: float = 120.0,
+        timeout: float = 300.0,
         max_retries: int = 3,
         retry_base_delay: float = 0.5,
         retry_max_delay: float = 8.0,

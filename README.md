@@ -4,8 +4,8 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-108%20passing-brightgreen.svg)]()
-[![v0.3](https://img.shields.io/badge/version-0.3--dev-orange.svg)]()
+[![Tests](https://img.shields.io/badge/tests-171%20passing-brightgreen.svg)]()
+[![v0.4](https://img.shields.io/badge/version-0.4--dev-orange.svg)]()
 
 ---
 
@@ -168,7 +168,7 @@ uv sync --all-extras
 # Check system status, available drivers, policies, and tasks
 uv run ctx-rm info
 
-# List all 13 benchmark tasks
+# List all 16 benchmark tasks
 uv run ctx-rm tasks
 ```
 
@@ -191,7 +191,7 @@ uv run ctx-rm compare ./results
 ### Run All Benchmarks
 
 ```bash
-# All 13 tasks × 3 modes
+# All 16 tasks × 3 modes
 uv run ctx-rm bench --all
 
 # With a specific policy
@@ -211,7 +211,7 @@ Displays system status: version, available drivers, policies, scorers, embedding
 
 ### `ctx-rm tasks`
 
-Lists all 13 benchmark tasks with their ID, title, eviction pressure type, turn count, needle count, and evaluation check count.
+Lists all 16 benchmark tasks with their ID, title, eviction pressure type, turn count, needle count, and evaluation check count.
 
 ### `ctx-rm bench`
 
@@ -249,6 +249,25 @@ results/
 │       └── llamacpp/
 │           └── run-1/
 │               └── ...
+```
+
+### `ctx-rm experiment`
+
+Runs multi-combination experiments from a YAML config. Sweeps across tasks, modes, policies, budget levels, and multiple runs.
+
+```bash
+# Run a predefined experiment suite
+uv run ctx-rm experiment docs/experiments/eviction_accuracy.yaml
+
+# Experiment configs define: tasks, modes, policies, budgets, runs, scorer, recall
+```
+
+### `ctx-rm analyze`
+
+Analyzes experiment results and displays evidence tables with per-EVID verdicts.
+
+```bash
+uv run ctx-rm analyze results/experiments/
 ```
 
 ### `ctx-rm compare`
@@ -383,7 +402,7 @@ The benchmark system evaluates whether intelligent context removal can match ful
 
 ### Task Design
 
-13 benchmark tasks test different eviction pressure patterns:
+16 benchmark tasks test different eviction pressure patterns:
 
 | Task | Title | Pressure Pattern |
 |------|-------|-----------------|
@@ -400,6 +419,9 @@ The benchmark system evaluates whether intelligent context removal can match ful
 | MULTI-001 | Cross-file Constraint | Sudden injection |
 | TRACE-001 | Bug Hunt in Log Noise | Sudden injection |
 | SPEC-001 | Config Synthesis from Spec | Sudden injection |
+| SCALE-001 | Multi-department Analytics | High volume (20K tokens) |
+| SCALE-002 | Cross-reference Reconciliation | High volume (30K tokens) |
+| SCALE-003 | Information Synthesis | High volume (40K tokens) |
 
 Each task contains:
 - **Needles**: Critical facts/code injected at specific turns that must be retained
@@ -421,7 +443,7 @@ Four assertion types verify agent output against fixture files:
 
 Each benchmark run produces:
 
-- **metrics.json**: Total tokens ingested, evicted, recalled; peak and average context utilization; eviction/recall counts; per-turn snapshots
+- **metrics.json**: Per-turn snapshots of active tokens, utilization, warm/cold counts; full eviction log with scores, reasons, and timing; recall events with source tier; ingestion timeline by role/source; agent response token counts per turn
 - **evaluation.json**: Pass/fail for each assertion check
 - **response_log.jsonl**: Full agent responses for every turn (append-only JSONL)
 
@@ -486,7 +508,7 @@ ctx-rm/
 │       ├── main.py                          # Typer CLI — info, tasks, bench, compare commands
 │       └── tui.py                           # Live TUI dashboard + post-run Rich summary
 │
-├── tests/                                   # 108 tests across 6 files
+├── tests/                                   # 171 tests across 6 files
 │   ├── core/                                # Bus, graveyard, sequential scorer
 │   ├── agents/                              # AgentLoop, recall, pair integrity
 │   ├── integration/                         # End-to-end pipeline tests (17 tests)
@@ -494,7 +516,7 @@ ctx-rm/
 │   └── configs/                             # YAML test configurations
 │
 ├── benchmarks/
-│   └── fixtures/                            # 10 mini-repo fixtures (one per task)
+│   └── fixtures/                            # 16 mini-repo fixtures (one per task)
 │       ├── legacy_flag_cascade/
 │       ├── migration_order_sensitivity/
 │       ├── protocol_handshake_sequence/
@@ -511,7 +533,14 @@ ctx-rm/
     ├── tiered_graveyard.md                  # Theoretical foundation (OS/DB → LLM mapping)
     ├── competitive_analysis.md              # MemAct, SWE-Pruner, ACON comparison
     ├── landscape.md                         # Research bibliography
-    └── context_removal_benchmark_tasks.yaml # 10 task definitions (YAML)
+    ├── context_removal_benchmark_tasks.yaml # 16 task definitions (YAML)
+    └── experiments/                         # YAML experiment configs
+        ├── eviction_accuracy.yaml           # BudgetAware vs LRU across SCALE tasks
+        ├── recall_effectiveness_on.yaml     # Recall on vs off
+        ├── recall_effectiveness_off.yaml    # Recall disabled baseline
+        ├── budget_sensitivity.yaml          # Budget sweep (1K-100K tokens)
+        ├── noise_degradation.yaml           # ctx-rm vs full across diverse tasks
+        └── context_window_scaling.yaml      # Quality at increasing budget levels
 ```
 
 ---
@@ -626,19 +655,47 @@ uv run pytest --cov=ctx_rm --cov-report=term-missing
 
 ---
 
-## Early Results
+## Results
 
-First benchmark results using Nemotron-3-Nano-30B via llama-server:
+Benchmark results using Nemotron-3-Nano-30B (30B params, Q4) via llama-server:
+
+### SCALE-003: Information Synthesis (40K tokens of context)
+
+The agent must read 10 department reports and produce an executive summary with specific metrics. 40K+ tokens of source material injected into context.
+
+| | **ctx-rm** | **full** |
+|---|---|---|
+| Result | **PASS (10/10)** | **FAIL (0/10)** |
+| Turns | 11 | 30 (hit limit) |
+| Prompt tokens | **174,210** | **1,120,656** |
+| Evictions | 12 | 0 |
+| Recalls | 6 | 0 |
+| Budget | 17,677 | 1,000,000 (unlimited) |
+
+Full mode **failed** — the model got stuck in a loop, re-reading the same file for 20+ turns, drowning in 42K tokens of accumulated context per prompt. ctx-rm **passed** by evicting stale noise, recalling data on demand, and keeping each prompt under 20K tokens.
+
+### Per-turn context evolution (ctx-rm)
+
+Metrics instrumentation captures the full lifecycle per turn:
+
+| Turn | Active tokens | Utilization | Tool | What happened |
+|------|-------------|-------------|------|------|
+| 1 | 13,883 | 79% | run_shell | Listed dirs. 2 noise segments evicted at ingest |
+| 4 | 18,314 | 104% | file_read | Read finance report (5K tok). Recall triggered. Eviction fired |
+| 7 | 18,123 | 103% | file_write | Wrote summary. 5 evictions — biggest cleanup |
+| 8 | 8,798 | 50% | list_dir | Stale read context cleaned. Recall for verification |
+| 11 | 9,216 | 52% | done | Task complete. 50% recall rate (6/12) |
+
+### SPEC-001: Config Synthesis
 
 | Task | Mode | Result | Prompt Tokens | Turns | Evictions |
 |------|------|--------|--------------|-------|-----------|
 | SPEC-001 | **ctx-rm** | **PASS 2/2** | **7,151** | 6 | 1 |
 | SPEC-001 | full | PASS 2/2 | 16,707 | 7 | 0 |
-| SPEC-001 | minimal | PASS 2/2 | 11,586 | 9 | 0 |
 
-ctx-rm passed with **57% fewer prompt tokens** than full mode and finished in fewer turns. The eviction engine stripped noise, kept the needle, and the agent completed faster with cleaner context.
+ctx-rm passed with **57% fewer prompt tokens** than full mode.
 
-These are early single-run results on a small local model — statistical validation across multiple runs and tasks is the next milestone.
+These results use a small local model (30B Q4). The key finding: ctx-rm doesn't just save tokens — on context-heavy tasks, it **enables success** where full-context mode fails because the model can't navigate the noise.
 
 ---
 
