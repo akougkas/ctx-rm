@@ -71,6 +71,7 @@ class AgentLoop:
         bus: ContextBus,
         working_dir: str,
         max_turns: int = 20,
+        min_turns: int = 1,
         watcher_config: WatcherConfig | None = None,
         enable_recall: bool = False,
         recall_top_k: int = 1,
@@ -81,6 +82,7 @@ class AgentLoop:
         self.bus = bus
         self.tool_executor = ToolExecutor(working_dir)
         self.max_turns = max_turns
+        self.min_turns = max(1, min_turns)
         self.watcher_config = watcher_config
         self.enable_recall = enable_recall
         self.recall_top_k = recall_top_k
@@ -217,17 +219,31 @@ class AgentLoop:
                     "tool_calls": len(response.tool_calls) if response.tool_calls else 0,
                 })
 
-                # Done tool terminates the loop immediately
+                current_turn = turn + 1
+
+                # Done tool terminates the loop after minimum-turn threshold
                 if response.tool_calls and done_called:
+                    if current_turn < self.min_turns:
+                        self._ingest_user_hint(
+                            f"Benchmark requires at least {self.min_turns} turns. "
+                            "Continue working and do not call done yet."
+                        )
+                        continue
                     return self._build_result(
-                        done_result, turn + 1,
+                        done_result, current_turn,
                         total_prompt, total_completion, tool_calls_made,
                         watcher,
                     )
 
                 if not response.tool_calls:
+                    if current_turn < self.min_turns:
+                        self._ingest_user_hint(
+                            f"Benchmark requires at least {self.min_turns} turns. "
+                            "Continue using tools and gathering evidence."
+                        )
+                        continue
                     return self._build_result(
-                        response.content, turn + 1,
+                        response.content, current_turn,
                         total_prompt, total_completion, tool_calls_made,
                         watcher,
                     )

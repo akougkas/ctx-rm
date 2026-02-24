@@ -120,6 +120,29 @@ class TestEvictionAccuracy:
         assert row.noise_ratio == pytest.approx(0.5)
         assert row.total_evictions == 4
 
+    def test_supports_experiment_root_layout(self, tmp_path: Path) -> None:
+        """Works when task paths are nested under an experiment directory."""
+        run_dir = (
+            tmp_path / "eviction-accuracy" / "SCALE-001" / "ctx-rm"
+            / "llamacpp" / "budget" / "run-1"
+        )
+        _write_json(run_dir / "metrics.json", _make_metrics([
+            {"seg_id": "n1", "source": "noise:data"},
+            {"seg_id": "k1", "source": "needle:key"},
+        ]))
+
+        # full mode metrics should be ignored for eviction-accuracy analysis
+        full_dir = tmp_path / "eviction-accuracy" / "SCALE-001" / "full" / "llamacpp" / "run-1"
+        _write_json(full_dir / "metrics.json", _make_metrics([
+            {"seg_id": "x1", "source": "noise:irrelevant"},
+        ]))
+
+        rows = compute_eviction_accuracy(tmp_path)
+        assert len(rows) == 1
+        assert rows[0].task_id == "SCALE-001"
+        assert rows[0].policy == "budget"
+        assert rows[0].total_evictions == 2
+
 
 # ── Recall comparison ─────────────────────────────────────────────────────────
 
@@ -169,6 +192,39 @@ class TestRecallComparison:
         row = rows[0]
         assert row.pass_rate_on == 1.0
         assert row.pass_rate_off == 0.0
+
+    def test_filters_to_ctx_rm_mode_only(self, tmp_path: Path) -> None:
+        """Recall comparison should ignore full-mode runs."""
+        on_dir = tmp_path / "recall-on"
+        off_dir = tmp_path / "recall-off"
+
+        # ctx-rm differs across on/off
+        _write_json(
+            on_dir / "SCALE-003" / "ctx-rm" / "llamacpp" / "budget" / "run-1" / "evaluation.json",
+            _make_eval(passed=True, prompt_tokens=5000, recalls_made=2),
+        )
+        _write_json(
+            off_dir / "SCALE-003" / "ctx-rm" / "llamacpp" / "budget" / "run-1" / "evaluation.json",
+            _make_eval(passed=False, prompt_tokens=4000, recalls_made=0),
+        )
+
+        # full mode should not affect comparison
+        _write_json(
+            on_dir / "SCALE-003" / "full" / "llamacpp" / "run-1" / "evaluation.json",
+            _make_eval(passed=True, prompt_tokens=99999, recalls_made=0),
+        )
+        _write_json(
+            off_dir / "SCALE-003" / "full" / "llamacpp" / "run-1" / "evaluation.json",
+            _make_eval(passed=True, prompt_tokens=99999, recalls_made=0),
+        )
+
+        rows = compute_recall_comparison(on_dir, off_dir)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.pass_rate_on == 1.0
+        assert row.pass_rate_off == 0.0
+        assert row.median_tokens_on == 5000.0
+        assert row.median_tokens_off == 4000.0
 
 
 # ── Budget knee ───────────────────────────────────────────────────────────────

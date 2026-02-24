@@ -23,8 +23,6 @@ import structlog
 import yaml
 from pydantic import BaseModel
 
-from ctx_rm.benchmarks.budget_map import BUDGET_MAP
-
 logger = structlog.get_logger()
 
 
@@ -44,6 +42,7 @@ class ExperimentConfig(BaseModel):
     budgets: list[int] = []
     scorer: str = "heuristic"
     enable_recall: bool = False
+    temperature: float = 0.0
 
     @classmethod
     def from_yaml(cls, path: Path) -> ExperimentConfig:
@@ -178,10 +177,10 @@ class ExperimentRunner:
             if on_progress is not None:
                 on_progress(i + 1, len(combos), combo)
 
-            # Resolve budget: 0 means auto from BUDGET_MAP
-            budget = combo.budget
-            if combo.mode == "ctx-rm" and budget == 0:
-                budget = BUDGET_MAP.get(combo.task_id, BenchmarkRunner.DEFAULT_TOKEN_BUDGET)
+            # Budget 0 in ctx-rm mode means "auto" (resolve via runner budget map).
+            budget: int | None = combo.budget
+            if combo.mode == "ctx-rm" and combo.budget == 0:
+                budget = None
 
             try:
                 runner = BenchmarkRunner(
@@ -194,6 +193,7 @@ class ExperimentRunner:
                     run_index=combo.run_index,
                     max_turns=self.config.max_turns,
                     enable_recall=self.config.enable_recall,
+                    driver_temperature=self.config.temperature,
                 )
                 await runner.run()
 

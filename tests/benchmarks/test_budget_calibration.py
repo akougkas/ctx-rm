@@ -168,6 +168,16 @@ class TestRunnerBudgetMapIntegration:
         bus = runner._create_bus()
         assert bus.token_budget == 5000
 
+    def test_runner_explicit_default_value_overrides_map(self) -> None:
+        """Explicitly passing 100_000 should not be treated as auto-map."""
+        runner = BenchmarkRunner(
+            task_id="SPEC-001",
+            mode="ctx-rm",
+            token_budget=100_000,
+        )
+        bus = runner._create_bus()
+        assert bus.token_budget == 100_000
+
     def test_runner_full_mode_ignores_map(self) -> None:
         """Full mode uses FULL_BUDGET regardless of BUDGET_MAP."""
         runner = BenchmarkRunner(

@@ -76,7 +76,7 @@ class BenchmarkRunner:
         driver_name: str = "llamacpp",
         task_id: str = "CR-001",
         mode: str = "ctx-rm",
-        token_budget: int = DEFAULT_TOKEN_BUDGET,
+        token_budget: int | None = None,
         policy_name: str = "budget",
         output_dir: Path = Path("./results"),
         yaml_path: Path = Path("docs/context_removal_benchmark_tasks.yaml"),
@@ -84,6 +84,7 @@ class BenchmarkRunner:
         run_index: int = 1,
         max_turns: int = 30,
         enable_recall: bool = False,
+        driver_temperature: float | None = None,
         on_bus_event: Any = None,
         on_loop_event: Any = None,
     ) -> None:
@@ -91,7 +92,8 @@ class BenchmarkRunner:
         self.task_id = task_id
         self.mode = mode
         self.token_budget = token_budget
-        self._explicit_budget = token_budget != self.DEFAULT_TOKEN_BUDGET
+        self._explicit_budget = token_budget is not None
+        self._resolved_budget: int | None = None
         self.policy_name = policy_name
         self.output_dir = output_dir
         self.yaml_path = yaml_path
@@ -99,6 +101,7 @@ class BenchmarkRunner:
         self.run_index = run_index
         self.max_turns = max_turns
         self.enable_recall = enable_recall
+        self.driver_temperature = driver_temperature
         self._on_bus_event = on_bus_event
         self._on_loop_event = on_loop_event
         self._task_goal = task_id
@@ -148,7 +151,7 @@ class BenchmarkRunner:
         bus = self._create_bus(metrics=metrics)
         self._last_bus = bus
 
-        self._inject_context(bus, task)
+        turn_injections = self._build_turn_injections(task)
 
         system_prompt = self._build_system_prompt(task)
         task_instruction = self._build_task_instruction(task, working_copy)
@@ -156,7 +159,9 @@ class BenchmarkRunner:
         # Wrap loop event callback to also update metrics per turn
         def _loop_event_with_metrics(event: str, data: dict) -> None:
             if event == "turn_start":
-                metrics.set_turn(data.get("turn", 0))
+                turn = int(data.get("turn", 0))
+                self._inject_turn_context(bus, turn_injections, turn)
+                metrics.set_turn(turn)
                 metrics.take_snapshot(bus.get_stats())
             elif event == "turn_end":
                 metrics.record_agent_response({
@@ -171,6 +176,7 @@ class BenchmarkRunner:
             bus=bus,
             working_dir=str(working_copy),
             max_turns=self.max_turns,
+            min_turns=task.min_turns,
             enable_recall=self.enable_recall,
             on_progress=_loop_event_with_metrics,
         )
@@ -189,7 +195,7 @@ class BenchmarkRunner:
             "task_id": eval_result.task_id,
             "mode": self.mode,
             "policy": self.policy_name if self.mode == "ctx-rm" else None,
-            "budget": self.token_budget,
+            "budget": self._resolve_budget(),
             "all_passed": eval_result.all_passed,
             "summary": eval_result.summary,
             "checks": [
@@ -258,9 +264,12 @@ class BenchmarkRunner:
 
     # ── Context injection ──────────────────────────────────────────────
 
-    def _inject_context(self, bus: ContextBus, task: Task) -> None:
+    def _build_turn_injections(self, task: Task) -> dict[int, list[Segment]]:
+        """Build turn-indexed context injections from task definitions."""
         if self.mode == "minimal":
-            return
+            return {}
+
+        by_turn: dict[int, list[Segment]] = {}
 
         for needle in task.needles:
             seg = Segment(
@@ -275,7 +284,7 @@ class BenchmarkRunner:
                     },
                 },
             )
-            bus.ingest(seg)
+            by_turn.setdefault(needle.injection_turn, []).append(seg)
 
         for injection in task.context_injections:
             noise = generate_noise(injection.size_tokens, injection.description)
@@ -291,6 +300,18 @@ class BenchmarkRunner:
                     },
                 },
             )
+            by_turn.setdefault(injection.turn, []).append(seg)
+
+        return by_turn
+
+    @staticmethod
+    def _inject_turn_context(
+        bus: ContextBus,
+        turn_injections: dict[int, list[Segment]],
+        turn: int,
+    ) -> None:
+        """Ingest all scheduled context segments for the current turn."""
+        for seg in turn_injections.pop(turn, []):
             bus.ingest(seg)
 
     # ── Bus creation ───────────────────────────────────────────────────
@@ -332,27 +353,36 @@ class BenchmarkRunner:
           3. ``ctx-rm`` mode + task in BUDGET_MAP -> use calibrated budget
           4. Fall through to configured ``self.token_budget``
         """
-        if self.mode == "full":
-            return self.FULL_BUDGET
+        if self._resolved_budget is not None:
+            return self._resolved_budget
 
-        if not self._explicit_budget and self.mode == "ctx-rm":
+        if self.mode == "full":
+            budget = self.FULL_BUDGET
+            source = "full_mode"
+        elif self.mode == "ctx-rm" and not self._explicit_budget:
             mapped = BUDGET_MAP.get(self.task_id)
             if mapped is not None:
-                logger.info(
-                    "budget_selected",
-                    task=self.task_id,
-                    budget=mapped,
-                    source="budget_map",
-                )
-                return mapped
+                budget = mapped
+                source = "budget_map"
+            else:
+                budget = self.DEFAULT_TOKEN_BUDGET
+                source = "default"
+        else:
+            budget = (
+                self.token_budget
+                if self.token_budget is not None
+                else self.DEFAULT_TOKEN_BUDGET
+            )
+            source = "explicit" if self._explicit_budget else "default"
 
+        self._resolved_budget = budget
         logger.info(
             "budget_selected",
             task=self.task_id,
-            budget=self.token_budget,
-            source="explicit" if self._explicit_budget else "default",
+            budget=budget,
+            source=source,
         )
-        return self.token_budget
+        return budget
 
     # ── Driver creation ────────────────────────────────────────────────
 
@@ -363,7 +393,11 @@ class BenchmarkRunner:
             config = CtxRmConfig()
             return LlamaCppDriver(
                 base_url=config.llama_base_url,
-                temperature=config.llama_temperature,
+                temperature=(
+                    self.driver_temperature
+                    if self.driver_temperature is not None
+                    else config.llama_temperature
+                ),
                 max_tokens=config.llama_max_tokens,
                 timeout=config.llama_timeout,
                 max_retries=config.llama_max_retries,
@@ -379,12 +413,13 @@ class BenchmarkRunner:
     # ── Result directory ───────────────────────────────────────────────
 
     def _result_dir(self) -> Path:
+        budget = self._resolve_budget()
         if self.mode == "ctx-rm":
             # Include budget in path to prevent different budget levels
             # from overwriting each other in budget-sweep experiments.
             return (
                 self.output_dir / self.task_id / "ctx-rm" / self.driver_name
-                / self.policy_name / f"b{self.token_budget}" / f"run-{self.run_index}"
+                / self.policy_name / f"b{budget}" / f"run-{self.run_index}"
             )
         return (
             self.output_dir / self.task_id / self.mode / self.driver_name
@@ -401,9 +436,9 @@ class BenchmarkRunner:
         elif self.policy_name == "budget":
             return BudgetAwarePolicy()
         elif self.policy_name == "arc":
-            return ARCPolicy(capacity_tokens=self.token_budget)
+            return ARCPolicy(capacity_tokens=self._resolve_budget())
         elif self.policy_name == "innodb":
-            return InnoDBPolicy(capacity_tokens=self.token_budget)
+            return InnoDBPolicy(capacity_tokens=self._resolve_budget())
         else:
             raise ValueError(f"Unknown policy: {self.policy_name}")
 

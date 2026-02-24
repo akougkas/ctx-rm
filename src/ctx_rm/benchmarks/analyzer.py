@@ -88,6 +88,25 @@ class NoiseDegradationRow:
     num_runs: int
 
 
+# ── Path helpers ─────────────────────────────────────────────────────────────
+
+
+_MODES = frozenset({"ctx-rm", "full", "minimal"})
+
+
+def _extract_task_mode(parts: tuple[str, ...]) -> tuple[str, str, int] | None:
+    """Return (task_id, mode, mode_index) from a result path parts tuple.
+
+    Supports both:
+      - task_id/mode/...
+      - experiment/task_id/mode/...
+    """
+    for idx, part in enumerate(parts):
+        if part in _MODES and idx >= 1:
+            return parts[idx - 1], part, idx
+    return None
+
+
 # ── Analysis functions ────────────────────────────────────────────────────────
 
 
@@ -105,11 +124,17 @@ def compute_eviction_accuracy(results_dir: Path) -> list[EvictionAccuracyRow]:
 
     for metrics_path in results_dir.rglob("metrics.json"):
         parts = metrics_path.relative_to(results_dir).parts
-        # Expected: task_id / ctx-rm / driver / policy / run-N / metrics.json
-        if len(parts) < 6:
+        info = _extract_task_mode(parts)
+        if info is None:
             continue
-        task_id = parts[0]
-        policy = parts[3]
+        task_id, mode, mode_idx = info
+        if mode != "ctx-rm":
+            continue
+
+        # Expected suffix from mode: ctx-rm / driver / policy / run-N / metrics.json
+        if len(parts) <= mode_idx + 2:
+            continue
+        policy = parts[mode_idx + 2]
 
         data = orjson.loads(metrics_path.read_bytes())
         evictions = data.get("evictions", [])
@@ -152,8 +177,9 @@ def compute_recall_comparison(
     Directory structure expected:
       {dir}/{task_id}/{mode}/{driver}/[{policy}/]run-{N}/evaluation.json
     """
-    on_data = _collect_eval_data(recall_on_dir)
-    off_data = _collect_eval_data(recall_off_dir)
+    # Compare recall impact on ctx-rm runs only.
+    on_data = _collect_eval_data(recall_on_dir, allowed_modes={"ctx-rm"})
+    off_data = _collect_eval_data(recall_off_dir, allowed_modes={"ctx-rm"})
 
     # Merge on task_id
     all_tasks = sorted(set(on_data.keys()) | set(off_data.keys()))
@@ -196,11 +222,10 @@ def compute_budget_knee(results_dir: Path) -> list[BudgetKneeRow]:
 
     for eval_path in results_dir.rglob("evaluation.json"):
         parts = eval_path.relative_to(results_dir).parts
-        if len(parts) < 4:
+        info = _extract_task_mode(parts)
+        if info is None:
             continue
-
-        task_id = parts[0]
-        mode = parts[1]
+        task_id, mode, _ = info
 
         eval_data = orjson.loads(eval_path.read_bytes())
         agent = eval_data.get("agent_result", {})
@@ -300,11 +325,10 @@ def compute_scaling_quality(results_dir: Path) -> list[ScalingRow]:
 
     for eval_path in results_dir.rglob("evaluation.json"):
         parts = eval_path.relative_to(results_dir).parts
-        if len(parts) < 4:
+        info = _extract_task_mode(parts)
+        if info is None:
             continue
-
-        task_id = parts[0]
-        mode = parts[1]
+        task_id, mode, _ = info
 
         eval_data = orjson.loads(eval_path.read_bytes())
         agent = eval_data.get("agent_result", {})
@@ -363,11 +387,10 @@ def find_noise_degradation(results_dir: Path) -> list[NoiseDegradationRow]:
 
     for eval_path in results_dir.rglob("evaluation.json"):
         parts = eval_path.relative_to(results_dir).parts
-        if len(parts) < 4:
+        info = _extract_task_mode(parts)
+        if info is None:
             continue
-
-        task_id = parts[0]
-        mode = parts[1]
+        task_id, mode, _ = info
 
         eval_data = orjson.loads(eval_path.read_bytes())
         run_info = {"passed": eval_data.get("all_passed")}
@@ -404,15 +427,21 @@ def find_noise_degradation(results_dir: Path) -> list[NoiseDegradationRow]:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _collect_eval_data(results_dir: Path) -> dict[str, list[dict]]:
+def _collect_eval_data(
+    results_dir: Path,
+    allowed_modes: set[str] | None = None,
+) -> dict[str, list[dict]]:
     """Collect evaluation data grouped by task_id from a results directory."""
     groups: dict[str, list[dict]] = {}
 
     for eval_path in results_dir.rglob("evaluation.json"):
         parts = eval_path.relative_to(results_dir).parts
-        if len(parts) < 4:
+        info = _extract_task_mode(parts)
+        if info is None:
             continue
-        task_id = parts[0]
+        task_id, mode, _ = info
+        if allowed_modes is not None and mode not in allowed_modes:
+            continue
 
         eval_data = orjson.loads(eval_path.read_bytes())
         agent = eval_data.get("agent_result", {})

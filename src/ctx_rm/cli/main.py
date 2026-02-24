@@ -203,9 +203,9 @@ def bench(
     batch_mode: Annotated[BatchMode, typer.Option(
         help="Eviction batch mode (ctx-rm mode only).",
     )] = BatchMode.fixed,
-    budget: Annotated[int, typer.Option(
-        help="Token budget for active context.",
-    )] = 100_000,
+    budget: Annotated[int | None, typer.Option(
+        help="Token budget for active context (ctx-rm). Omit for task auto-budget.",
+    )] = None,
     output: Annotated[Path, typer.Option(
         help="Output directory for results.",
     )] = Path("./results"),
@@ -256,7 +256,12 @@ def bench(
         header.append(f"  scorer={scorer.value}", style="magenta")
         header.append(f"  batch={batch_mode.value}", style="magenta")
         header.append(f"  recall={enable_recall}", style="magenta")
-    header.append(f"  budget={budget:,}", style="dim")
+    if budget is None and mode == Mode.ctx_rm:
+        header.append("  budget=auto", style="dim")
+    elif budget is None:
+        header.append("  budget=default", style="dim")
+    else:
+        header.append(f"  budget={budget:,}", style="dim")
     header.append(f"  run={run_index}", style="dim")
     console.print(header)
     console.print()
@@ -276,7 +281,7 @@ def bench(
             wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
         )
 
-        tui = TuiDashboard(task_id=task, mode=mode.value, budget=budget)
+        tui = TuiDashboard(task_id=task, mode=mode.value, budget=budget or 0)
         tui.set_max_turns(max_turns)
         tui.start()
 
@@ -303,11 +308,9 @@ def bench(
                 wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
             )
 
-    # Show post-run summary — path must match runner._result_dir()
-    if mode == Mode.ctx_rm:
-        result_dir = output / task / "ctx-rm" / "llamacpp" / policy.value / f"b{budget}" / f"run-{run_index}"
-    else:
-        result_dir = output / task / mode.value / "llamacpp" / f"run-{run_index}"
+    # Show post-run summary — use resolved runner path (handles auto budget).
+    result_dir = runner._result_dir()
+    effective_budget = runner._resolve_budget()
 
     if (result_dir / "evaluation.json").exists():
         import orjson
@@ -328,14 +331,14 @@ def bench(
             evictions=agent_result.get("segments_evicted", 0),
             recalls=agent_result.get("recalls_made", 0),
             active_tokens=0,
-            budget=budget,
+            budget=effective_budget,
         )
     console.print(f"  Output: [dim]{result_dir}[/dim]\n")
 
 
 def _run_batch(
     policy: Policy,
-    budget: int,
+    budget: int | None,
     output: Path,
     scorer: ScorerChoice,
     batch_mode: BatchMode,
@@ -357,9 +360,10 @@ def _run_batch(
         f"  [bold]Batch:[/bold] {len(task_ids)} tasks x {len(modes)} modes "
         f"= [bold]{total}[/bold] runs"
     )
+    budget_label = "auto" if budget is None else f"{budget:,}"
     console.print(
         f"  [dim]policy={policy.value}  scorer={scorer.value}  "
-        f"batch={batch_mode.value}  budget={budget:,}[/dim]"
+        f"batch={batch_mode.value}  budget={budget_label}[/dim]"
     )
     console.print()
 
@@ -895,9 +899,38 @@ def analyze(
 
     shown = 0
 
+    def _first_existing(base: Path, names: list[str]) -> Path | None:
+        for name in names:
+            candidate = base / name
+            if candidate.is_dir():
+                return candidate
+        return None
+
+    eviction_dir = _first_existing(results_dir, ["eviction-accuracy"]) or results_dir
+    budget_dir = _first_existing(results_dir, ["budget-sensitivity"]) or results_dir
+    scaling_dir = _first_existing(results_dir, ["context-window-scaling"]) or results_dir
+    noise_dir = _first_existing(results_dir, ["noise-degradation"]) or results_dir
+
+    recall_on = _first_existing(results_dir, ["recall-on", "recall-effectiveness-on"])
+    recall_off = _first_existing(results_dir, ["recall-off", "recall-effectiveness-off"])
+    if recall_on is None and results_dir.name in {"recall-on", "recall-effectiveness-on"}:
+        sibling = results_dir.parent / (
+            "recall-effectiveness-off" if results_dir.name == "recall-effectiveness-on" else "recall-off"
+        )
+        if sibling.is_dir():
+            recall_on = results_dir
+            recall_off = sibling
+    if recall_off is None and results_dir.name in {"recall-off", "recall-effectiveness-off"}:
+        sibling = results_dir.parent / (
+            "recall-effectiveness-on" if results_dir.name == "recall-effectiveness-off" else "recall-on"
+        )
+        if sibling.is_dir():
+            recall_off = results_dir
+            recall_on = sibling
+
     # ── Eviction accuracy ──
     if analysis in (AnalysisType.eviction, AnalysisType.all):
-        rows = compute_eviction_accuracy(results_dir)
+        rows = compute_eviction_accuracy(eviction_dir)
         if rows:
             table = Table(
                 title="Eviction Accuracy",
@@ -937,7 +970,7 @@ def analyze(
 
     # ── Scaling quality ──
     if analysis in (AnalysisType.scaling, AnalysisType.all):
-        rows = compute_scaling_quality(results_dir)
+        rows = compute_scaling_quality(scaling_dir)
         if rows:
             table = Table(
                 title="Context Window Scaling",
@@ -976,7 +1009,7 @@ def analyze(
 
     # ── Noise degradation ──
     if analysis in (AnalysisType.noise, AnalysisType.all):
-        rows = find_noise_degradation(results_dir)
+        rows = find_noise_degradation(noise_dir)
         if rows:
             table = Table(
                 title="Noise Degradation Analysis",
@@ -1018,7 +1051,7 @@ def analyze(
 
     # ── Budget knee ──
     if analysis in (AnalysisType.budget, AnalysisType.all):
-        knee_rows = compute_budget_knee(results_dir)
+        knee_rows = compute_budget_knee(budget_dir)
         if knee_rows:
             table = Table(
                 title="Budget Knee Analysis",
@@ -1071,10 +1104,7 @@ def analyze(
 
     # ── Recall comparison (needs two dirs) ──
     if analysis in (AnalysisType.recall, AnalysisType.all):
-        # Look for recall-on / recall-off subdirectories
-        recall_on = results_dir / "recall-on"
-        recall_off = results_dir / "recall-off"
-        if recall_on.is_dir() and recall_off.is_dir():
+        if recall_on is not None and recall_off is not None:
             from ctx_rm.benchmarks.analyzer import compute_recall_comparison
 
             rows = compute_recall_comparison(recall_on, recall_off)
@@ -1107,7 +1137,10 @@ def analyze(
                 console.print(table)
                 shown += 1
         elif analysis == AnalysisType.recall:
-            console.print("\n  [dim]No recall-on/recall-off subdirectories found.[/dim]")
+            console.print(
+                "\n  [dim]No recall-on/off directories found "
+                "(accepted names: recall-on/off or recall-effectiveness-on/off).[/dim]"
+            )
 
     if shown == 0 and analysis == AnalysisType.all:
         console.print("\n  [dim]No analyzable data found in this directory.[/dim]")

@@ -1,0 +1,10 @@
+name: dev-smoke
+output_dir: ./results/experiments/dev-smoke
+runs: 1
+max_turns: 8
+tasks: [SPEC-001, SCALE-001]
+modes: [ctx-rm, full]
+policies: [budget]
+budgets: [4000]
+scorer: heuristic
+enable_recall: true
