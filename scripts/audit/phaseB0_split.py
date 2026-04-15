@@ -1,3 +1,19 @@
+"""Phase B0: trace-level train/validation split with burn list filtering.
+
+Locks the burn list from Phase A1 artifacts (phaseA1_audit_*_strict.jsonl),
+applies the default inclusion rule (segments>=40 & turns>=8 & tool_use>=8 & rereads>=1),
+and produces seed-1 tuning and validation slices for Phase B0 graph work.
+
+Usage::
+
+    python scripts/audit/phaseB0_split.py \\
+        --trace-dir ~/.claude/projects/-home-akougkas-projects-awoc \\
+        --project awoc \\
+        --burn-list docs/eval/phaseB0-burn-traces.txt \\
+        --out docs/eval/phaseB0_validation_split.json \\
+        --seed 1 --tuning-n 30 --validation-n 60
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -9,9 +25,9 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO / "src"))
 
-from ctx_rm.eval.trace.claude_code import discover_transcripts, load_transcript
-from ctx_rm.eval.trace.normalize import normalize
-from ctx_rm.eval.trace.schema import TraceSegmentKind
+from ctx_rm.eval.trace.claude_code import discover_transcripts, load_transcript  # noqa: E402
+from ctx_rm.eval.trace.normalize import normalize  # noqa: E402
+from ctx_rm.eval.trace.schema import TraceSegmentKind  # noqa: E402
 
 
 def _extract_burn_list(burn_path: Path) -> set[str]:
@@ -51,11 +67,14 @@ def main() -> None:
     all_paths = [p for p in discover_transcripts(args.trace_dir) if str(p) not in burn]
 
     eligible = []
+    skipped = 0
     for path in all_paths:
         try:
             lt = load_transcript(path)
             trace = normalize(lt, project=args.project)
-        except Exception:
+        except Exception as exc:  # pragma: no cover
+            print(f"  skip {path.name}: {exc}", file=sys.stderr)
+            skipped += 1
             continue
         tool_uses = sum(1 for s in trace.segments if s.kind == TraceSegmentKind.TOOL_USE)
         seen, rereads = set(), 0
@@ -95,7 +114,8 @@ def main() -> None:
     )
     print(
         f"burn={len(burn)} eligible={len(eligible)} "
-        f"tuning={len(tuning)} validation={len(validation)} remainder={len(remainder)}"
+        f"tuning={len(tuning)} validation={len(validation)} remainder={len(remainder)} "
+        f"skipped={skipped}"
     )
 
 
