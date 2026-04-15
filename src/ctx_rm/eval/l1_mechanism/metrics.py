@@ -16,11 +16,16 @@ Metric definitions (paper reports these verbatim):
   "ever active" denominator so pinned / never-active segments don't inflate
   the ratio.
 
-- **critical_segment_retention(k)** = mean over turns of
-    |{s in snapshot : reference_graph says s is referenced within [t+1, t+k]}|
-    / |{s that WILL be referenced within [t+1, t+k]}|
-  "At each turn, what fraction of segments the LLM will need in the next k
-  turns are still in active context right now?" This is the headline number.
+- **critical_segment_retention** = mean over turns of
+    |{s in snapshot : reference_graph says s is referenced at some future turn}|
+    / |{s that WILL be referenced at any future turn}|
+  "At each turn, what fraction of segments the LLM will need *ever again*
+  are still in active context right now?" Headline number; horizon covers
+  the remainder of the trace.
+
+- **critical_segment_retention_k10** = same computation with a 10-turn
+  lookahead window. Secondary column for comparison with short-horizon
+  policies.
 
 - **churn_rate** = |{s : s was evicted and later recalled}| / |evicted|
   Fraction of evictions that thrashed.
@@ -35,6 +40,11 @@ from dataclasses import dataclass
 from ctx_rm.eval.l1_mechanism.runner import L1Result
 from ctx_rm.eval.trace.reference_graph import ReferenceGraph
 from ctx_rm.eval.trace.schema import Trace, TraceSegment
+
+# "All future turns" is modeled as a horizon so large it never clamps the
+# available trace length. The per-turn retention loop is monotonic in the
+# horizon so any value ≥ max turn works; we pick 10**9 for readability.
+_ALL_FUTURE_HORIZON = 10**9
 
 
 @dataclass
@@ -55,10 +65,12 @@ class L1Metrics:
     eviction_recall: float
     churn_rate: float
 
-    # Retention is parameterized by horizon k (turns). We store a single
-    # default value (k=5) and let the runner compute additional horizons if
-    # desired. k=5 approximates "the next few LLM calls".
-    critical_segment_retention_k5: float
+    # Headline retention uses an unbounded horizon: every critical segment
+    # needed anywhere in the rest of the trace counts. critical_segment_retention_k10
+    # is the short-horizon companion for comparison with policies that
+    # target near-future reuse only.
+    critical_segment_retention: float
+    critical_segment_retention_k10: float
 
     # Aggregate cost proxies.
     tokens_evicted: int
@@ -78,7 +90,8 @@ class L1Metrics:
             "eviction_precision": self.eviction_precision,
             "eviction_recall": self.eviction_recall,
             "churn_rate": self.churn_rate,
-            "retention@5": self.critical_segment_retention_k5,
+            "retention": self.critical_segment_retention,
+            "retention@10": self.critical_segment_retention_k10,
             "tokens_evicted": self.tokens_evicted,
             "tokens_recalled": self.tokens_recalled,
         }
@@ -88,8 +101,6 @@ def compute_metrics(
     result: L1Result,
     trace: Trace,
     graph: ReferenceGraph,
-    *,
-    retention_horizon: int = 5,
 ) -> L1Metrics:
     """Reduce one L1Result plus its trace+graph into an L1Metrics bundle."""
     seg_by_id: dict[str, TraceSegment] = {s.seg_id: s for s in trace.segments}
@@ -133,10 +144,12 @@ def compute_metrics(
     tokens_recalled = _tokens_for(recalled_set)
     peak = max((snap.active_tokens for snap in result.snapshots), default=0)
 
-    # Critical-segment retention@k. For each turn snapshot, find segments
-    # that are referenced within [t+1, t+k], compute the fraction still in
-    # active context. Average across turns weighted uniformly.
-    retention = _critical_segment_retention(result, trace, graph, horizon=retention_horizon)
+    # Critical-segment retention. Headline uses an unbounded horizon so any
+    # future reference counts; retention@10 is the short-horizon companion.
+    retention_all = _critical_segment_retention(
+        result, trace, graph, horizon=_ALL_FUTURE_HORIZON
+    )
+    retention_k10 = _critical_segment_retention(result, trace, graph, horizon=10)
 
     return L1Metrics(
         trace_id=trace.trace_id,
@@ -151,7 +164,8 @@ def compute_metrics(
         eviction_precision=eviction_precision,
         eviction_recall=eviction_recall,
         churn_rate=churn_rate,
-        critical_segment_retention_k5=retention,
+        critical_segment_retention=retention_all,
+        critical_segment_retention_k10=retention_k10,
         tokens_evicted=tokens_evicted,
         tokens_recalled=tokens_recalled,
     )

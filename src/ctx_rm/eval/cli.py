@@ -194,7 +194,8 @@ def _print_table(
         table.add_column("n", justify="right")
         table.add_column("precision", justify="right")
         table.add_column("eviction recall", justify="right")
-        table.add_column("retention@5", justify="right")
+        table.add_column("retention", justify="right")
+        table.add_column("retention@10", justify="right")
         table.add_column("churn", justify="right")
         table.add_column("tok_evc", justify="right")
 
@@ -205,7 +206,12 @@ def _print_table(
             n = len(cell)
             prec = bootstrap_mean_ci([c.eviction_precision for c in cell], seed=seed)
             erec = bootstrap_mean_ci([c.eviction_recall for c in cell], seed=seed)
-            ret5 = bootstrap_mean_ci([c.critical_segment_retention_k5 for c in cell], seed=seed)
+            ret = bootstrap_mean_ci(
+                [c.critical_segment_retention for c in cell], seed=seed
+            )
+            ret10 = bootstrap_mean_ci(
+                [c.critical_segment_retention_k10 for c in cell], seed=seed
+            )
             churn = bootstrap_mean_ci([c.churn_rate for c in cell], seed=seed)
             tok_evc = bootstrap_mean_ci([float(c.tokens_evicted) for c in cell], seed=seed)
 
@@ -220,7 +226,14 @@ def _print_table(
                 return f"{int(ci.mean)} [{int(ci.low)}, {int(ci.high)}]"
 
             table.add_row(
-                name, str(n), fmt(prec), fmt(erec), fmt(ret5), fmt(churn), fmt_int(tok_evc)
+                name,
+                str(n),
+                fmt(prec),
+                fmt(erec),
+                fmt(ret),
+                fmt(ret10),
+                fmt(churn),
+                fmt_int(tok_evc),
             )
         console.print(table)
 

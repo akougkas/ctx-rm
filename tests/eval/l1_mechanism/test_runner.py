@@ -156,7 +156,8 @@ class TestOracleDominates:
         # Oracle should be at least as good as random on every axis.
         assert oracle_m.eviction_precision >= random_m.eviction_precision - 1e-9
         assert (
-            oracle_m.critical_segment_retention_k5 >= random_m.critical_segment_retention_k5 - 1e-9
+            oracle_m.critical_segment_retention
+            >= random_m.critical_segment_retention - 1e-9
         )
 
     def test_oracle_keeps_referenced_segment_on_toy(self) -> None:
@@ -215,6 +216,7 @@ class TestMetricsBasics:
             )
         )
         m = compute_metrics(result, trace, graph)
-        assert 0.0 <= m.critical_segment_retention_k5 <= 1.0
+        assert 0.0 <= m.critical_segment_retention <= 1.0
+        assert 0.0 <= m.critical_segment_retention_k10 <= 1.0
         assert 0.0 <= m.eviction_precision <= 1.0
         assert 0.0 <= m.eviction_recall <= 1.0
