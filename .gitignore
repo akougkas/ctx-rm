@@ -211,3 +211,4 @@ results/
 *.db
 .planning/
 .code/
+.worktrees/
