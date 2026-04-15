@@ -116,6 +116,56 @@ class TestFileRereadEdge:
         assert graph.num_edges == 0
 
 
+class TestFileRereadDirectoryGuard:
+    def test_glob_pattern_path_does_not_create_edge(self) -> None:
+        segs = [
+            _seg(
+                "tu1",
+                0,
+                0,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Glob pattern=**/shared.ts path=/awoc",
+                tool_name="Glob",
+                source_file="/awoc",
+            ),
+            _seg(
+                "tu2",
+                1,
+                1,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Glob pattern=**/cli.ts path=/awoc",
+                tool_name="Glob",
+                source_file="/awoc",
+            ),
+        ]
+        g = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        assert all(e.kind != ReferenceEdgeKind.FILE_REREAD for e in g.edges)
+
+    def test_literal_file_path_still_creates_edge(self) -> None:
+        segs = [
+            _seg(
+                "tu1",
+                0,
+                0,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Read file_path=/a/b/c.py",
+                tool_name="Read",
+                source_file="/a/b/c.py",
+            ),
+            _seg(
+                "tu2",
+                1,
+                1,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Read file_path=/a/b/c.py",
+                tool_name="Read",
+                source_file="/a/b/c.py",
+            ),
+        ]
+        g = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        assert any(e.kind == ReferenceEdgeKind.FILE_REREAD for e in g.edges)
+
+
 class TestExactQuoteEdge:
     def test_later_text_quoting_tool_result(self) -> None:
         result_text = (

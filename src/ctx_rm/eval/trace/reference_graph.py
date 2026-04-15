@@ -292,6 +292,25 @@ class ReferenceGraph:
         stripped = strip_path_segments(seg.content or "")
         return len(stripped.strip()) >= _MIN_STRIPPED_CONTENT_CHARS
 
+    def _is_concrete_file_path(self, path: str | None) -> bool:
+        """True iff ``path`` looks like a single literal file.
+
+        Rejects paths that contain glob metacharacters (``*?[]{}``) or
+        whose final component lacks an internal dot. Directory paths
+        like ``/awoc`` and glob patterns like ``**/*.py`` fail. Dotted
+        leafs like ``.env.local`` pass because they contain a dot
+        somewhere past the first character.
+        """
+        if not path:
+            return False
+        if any(c in path for c in "*?[]{}"):
+            return False
+        leaf = path.rsplit("/", 1)[-1]
+        if not leaf:
+            return False
+        last_dot = leaf.rfind(".")
+        return last_dot > 0
+
     def _rule_file_reread(self) -> None:
         """Rule: later tool_use of path P references earlier segments touching P."""
         segs = self.trace.segments
@@ -304,7 +323,9 @@ class ReferenceGraph:
         path_index: dict[str, list[int]] = defaultdict(list)
         tool_use_path_by_id: dict[str, str] = {}
         for i, s in enumerate(segs):
-            if s.kind == TraceSegmentKind.TOOL_USE and s.source_file:
+            if s.kind == TraceSegmentKind.TOOL_USE and self._is_concrete_file_path(
+                s.source_file
+            ):
                 path_index[s.source_file].append(i)
                 if s.tool_use_id:
                     tool_use_path_by_id[s.tool_use_id] = s.source_file
@@ -319,7 +340,9 @@ class ReferenceGraph:
         # Rule 1: file_reread. For each later tool_use with source_file=P,
         # add edges from all earlier path-tagged segments to that tool_use.
         for i, s in enumerate(segs):
-            if s.kind == TraceSegmentKind.TOOL_USE and s.source_file:
+            if s.kind == TraceSegmentKind.TOOL_USE and self._is_concrete_file_path(
+                s.source_file
+            ):
                 for j in path_index.get(s.source_file, []):
                     if j < i:
                         src = segs[j]
