@@ -57,8 +57,19 @@ class ARCPolicy(EvictionPolicy):
         """Handle segment ingestion: ghost hit detection + list placement."""
         sid = seg.seg_id
         tc = seg.token_count
+        reingest_evicted_sid = seg.metadata.get("reingest_evicted_seg_id")
 
         # Case 1: Ghost hit on B1 -> increase p (favor recency)
+        if isinstance(reingest_evicted_sid, str) and reingest_evicted_sid in self._b1:
+            ghost_tc = self._b1.pop(reingest_evicted_sid)
+            # Adapt: increase p by at least 1 token, scaled by relative sizes
+            b2_tokens = sum(self._b2.values()) or 1
+            b1_tokens = sum(self._b1.values()) or 1
+            delta = max(1, (b2_tokens / b1_tokens) * ghost_tc)
+            self._p = min(self._p + delta, float(self._capacity))
+            # Promote the returning content to T2 under the new segment id.
+            self._t2[sid] = tc
+            return
         if sid in self._b1:
             ghost_tc = self._b1.pop(sid)
             # Adapt: increase p by at least 1 token, scaled by relative sizes
@@ -71,6 +82,14 @@ class ARCPolicy(EvictionPolicy):
             return
 
         # Case 2: Ghost hit on B2 -> decrease p (favor frequency)
+        if isinstance(reingest_evicted_sid, str) and reingest_evicted_sid in self._b2:
+            ghost_tc = self._b2.pop(reingest_evicted_sid)
+            b1_tokens = sum(self._b1.values()) or 1
+            b2_tokens = sum(self._b2.values()) or 1
+            delta = max(1, (b1_tokens / b2_tokens) * ghost_tc)
+            self._p = max(self._p - delta, 0.0)
+            self._t2[sid] = tc
+            return
         if sid in self._b2:
             ghost_tc = self._b2.pop(sid)
             b1_tokens = sum(self._b1.values()) or 1

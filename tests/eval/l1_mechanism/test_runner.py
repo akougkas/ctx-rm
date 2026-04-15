@@ -7,6 +7,8 @@ assertions rather than subtly wrong aggregates.
 
 from __future__ import annotations
 
+from ctx_rm.core.policies.arc import ARCPolicy
+from ctx_rm.core.policies.innodb import InnoDBPolicy
 from ctx_rm.core.policies.lru import LRUPolicy
 from ctx_rm.eval.controls.oracle import OraclePolicy
 from ctx_rm.eval.controls.random_policy import RandomPolicy
@@ -91,6 +93,83 @@ def _toy_trace() -> Trace:
         )
     )
     return Trace(trace_id="toy", source_path="mem", project="test", segments=segs)
+
+
+def _reaccess_trace() -> Trace:
+    """Build a trace where one evicted tool_result returns with identical content.
+
+    The repeated `tool_result` body is an honest in-trace re-access signal.
+    A policy that notices "this content came back after eviction" can protect
+    it as frequency-bearing state; plain LRU cannot.
+    """
+    segs = [
+        _mk_seg("u0", 0, 0, "track repeated tool output", tokens=20),
+        _mk_seg(
+            "tool_a_1",
+            0,
+            1,
+            "FILE auth.py\nTOKEN rotate_secret_v1\nRETURN 200 OK",
+            kind=TraceSegmentKind.TOOL_RESULT,
+            tokens=400,
+        ),
+        _mk_seg(
+            "tool_b",
+            1,
+            2,
+            "FILE billing.py\nTOKEN bill_user_v1\nRETURN 200 OK",
+            kind=TraceSegmentKind.TOOL_RESULT,
+            tokens=400,
+        ),
+        _mk_seg(
+            "tool_c",
+            2,
+            3,
+            "FILE cache.py\nTOKEN warm_cache_v1\nRETURN 200 OK",
+            kind=TraceSegmentKind.TOOL_RESULT,
+            tokens=400,
+        ),
+        _mk_seg(
+            "tool_d",
+            3,
+            4,
+            "FILE jobs.py\nTOKEN queue_job_v1\nRETURN 200 OK",
+            kind=TraceSegmentKind.TOOL_RESULT,
+            tokens=400,
+        ),
+        _mk_seg(
+            "tool_a_2",
+            4,
+            5,
+            "FILE auth.py\nTOKEN rotate_secret_v1\nRETURN 200 OK",
+            kind=TraceSegmentKind.TOOL_RESULT,
+            tokens=400,
+        ),
+        _mk_seg(
+            "tool_e",
+            5,
+            6,
+            "FILE mail.py\nTOKEN send_mail_v1\nRETURN 200 OK",
+            kind=TraceSegmentKind.TOOL_RESULT,
+            tokens=400,
+        ),
+        _mk_seg(
+            "tool_f",
+            6,
+            7,
+            "FILE audit.py\nTOKEN write_audit_v1\nRETURN 200 OK",
+            kind=TraceSegmentKind.TOOL_RESULT,
+            tokens=400,
+        ),
+        _mk_seg(
+            "tool_g",
+            7,
+            8,
+            "FILE search.py\nTOKEN build_index_v1\nRETURN 200 OK",
+            kind=TraceSegmentKind.TOOL_RESULT,
+            tokens=400,
+        ),
+    ]
+    return Trace(trace_id="reaccess", source_path="mem", project="test", segments=segs)
 
 
 class TestRunnerBasics:
@@ -294,3 +373,48 @@ class TestDisableBypass:
         disabled_active = set(disabled.snapshots[-1].active_seg_ids)
         assert "tr" not in default_active
         assert "tr" in disabled_active
+
+
+class TestRepeatedContentReaccess:
+    def test_arc_diverges_from_lru_when_evicted_content_returns(self) -> None:
+        trace = _reaccess_trace()
+        graph = ReferenceGraph.build(trace, ReferenceMode.STRICT)
+        cfg = dict(
+            trace=trace,
+            reference_graph=graph,
+            token_budget=1200,
+            headroom_ratio=0.0,
+            disable_bypass=True,
+        )
+
+        lru = run_l1(
+            L1RunConfig(
+                **cfg,
+                policy_factory=lambda g: LRUPolicy(),
+                policy_name="lru",
+            )
+        )
+        arc = run_l1(
+            L1RunConfig(
+                **cfg,
+                policy_factory=lambda g: ARCPolicy(capacity_tokens=1200),
+                policy_name="arc",
+            )
+        )
+        innodb = run_l1(
+            L1RunConfig(
+                **cfg,
+                policy_factory=lambda g: InnoDBPolicy(capacity_tokens=1200),
+                policy_name="innodb",
+            )
+        )
+
+        lru_evictions = [sid for sid, _ in lru.evictions]
+        arc_evictions = [sid for sid, _ in arc.evictions]
+        innodb_evictions = [sid for sid, _ in innodb.evictions]
+
+        assert lru_evictions[-1] == "tool_a_2"
+        assert arc_evictions[-1] != "tool_a_2"
+        assert innodb_evictions[-1] != "tool_a_2"
+        assert lru_evictions != arc_evictions
+        assert lru_evictions != innodb_evictions

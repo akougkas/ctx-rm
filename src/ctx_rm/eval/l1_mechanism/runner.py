@@ -15,6 +15,7 @@ oracle" is encapsulated here via `set_current_turn` hooks for the controls.
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -50,6 +51,17 @@ _KIND_TO_SOURCE: dict[TraceSegmentKind, str] = {
     TraceSegmentKind.TOOL_RESULT: "tool",
     TraceSegmentKind.ATTACHMENT: "attachment",
 }
+
+
+def _reaccess_fingerprint(ts: TraceSegment) -> str | None:
+    """Return a stable key for honest in-trace content re-access detection."""
+    if ts.kind != TraceSegmentKind.TOOL_RESULT or not ts.content:
+        return None
+    h = hashlib.sha1(usedforsecurity=False)
+    h.update(ts.kind.value.encode())
+    h.update(b"|")
+    h.update(ts.content.encode(errors="replace"))
+    return h.hexdigest()
 
 
 @dataclass
@@ -136,6 +148,8 @@ def run_l1(config: L1RunConfig) -> L1Result:
     store = TieredStore()
     evictions: list[tuple[str, int]] = []
     recalls: list[tuple[str, int]] = []
+    evicted_ids: set[str] = set()
+    last_seen_by_fingerprint: dict[str, str] = {}
 
     def on_event(name: str, data: dict) -> None:
         seg_id = data.get("seg_id")
@@ -143,8 +157,10 @@ def run_l1(config: L1RunConfig) -> L1Result:
             return
         if name == "evict":
             evictions.append((seg_id, current_turn))
+            evicted_ids.add(seg_id)
         elif name == "recall":
             recalls.append((seg_id, current_turn))
+            evicted_ids.discard(seg_id)
 
     admission_threshold = sys.maxsize if config.disable_bypass else 2000
     bus = ContextBus(
@@ -186,8 +202,15 @@ def run_l1(config: L1RunConfig) -> L1Result:
                 policy.set_current_turn(current_turn)
 
         seg = _trace_to_segment(ts, pin_system=config.pin_system)
+        fingerprint = _reaccess_fingerprint(ts)
+        if fingerprint is not None:
+            prior_seg_id = last_seen_by_fingerprint.get(fingerprint)
+            if prior_seg_id is not None and prior_seg_id in evicted_ids:
+                seg.metadata["reingest_evicted_seg_id"] = prior_seg_id
         bus.ingest(seg)
         ingested += 1
+        if fingerprint is not None:
+            last_seen_by_fingerprint[fingerprint] = seg.seg_id
 
     # Final snapshot at the very end.
     _snapshot(max(current_turn, 0))

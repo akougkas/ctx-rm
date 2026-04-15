@@ -64,6 +64,11 @@ class InnoDBPolicy(EvictionPolicy):
         if sid in self._new or sid in self._old:
             return
 
+        if isinstance(seg.metadata.get("reingest_evicted_seg_id"), str):
+            self._new[sid] = tc
+            self._new_tokens += tc
+            return
+
         # Insert at end of old sublist (tail = most recent insertion)
         self._old[sid] = tc
         self._old_tokens += tc
