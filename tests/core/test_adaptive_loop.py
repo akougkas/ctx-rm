@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from ctx_rm.core.adaptive import (
-    _AGGRESSIVENESS_STEP,
-    _HIGH_RECALL_RATE,
     _MIN_EVENTS_FOR_SHIFT,
     AdaptiveWeights,
 )
@@ -68,10 +66,9 @@ class TestBusDrivesPolicyFromFeedback:
         return bus, policy, feedback, adaptive
 
     def test_conservative_shift_propagates_to_policy(self) -> None:
-        bus, policy, feedback, adaptive = self._bus()
+        bus, policy, feedback, _adaptive = self._bus()
 
         # Seed enough events to trigger a conservative shift.
-        seg = _seg(0)
         for i in range(_MIN_EVENTS_FOR_SHIFT + 2):
             s = _seg(i)
             feedback.on_eviction(s)
@@ -86,7 +83,7 @@ class TestBusDrivesPolicyFromFeedback:
         assert policy.aggressiveness < 1.0 + 1e-9
 
     def test_aggressive_shift_raises_policy_aggressiveness(self) -> None:
-        bus, policy, feedback, adaptive = self._bus()
+        bus, policy, feedback, _adaptive = self._bus()
 
         for i in range(_MIN_EVENTS_FOR_SHIFT + 2):
             feedback.on_eviction(_seg(i))

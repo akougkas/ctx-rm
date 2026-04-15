@@ -16,7 +16,6 @@ import pytest
 
 from ctx_rm.agents.tools import (
     MAX_FILE_READ_BYTES,
-    MAX_SHELL_TIMEOUT_SECONDS,
     ToolExecutor,
 )
 

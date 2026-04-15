@@ -10,18 +10,16 @@ Covers four requirements:
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ctx_rm.core.scorer import HeuristicScorer
-from ctx_rm.core.segment import Segment, SegmentRole, Tier
+from ctx_rm.agents.loop import AgentLoop
 from ctx_rm.core.bus import ContextBus
 from ctx_rm.core.graveyard import TieredStore
 from ctx_rm.core.policies.lru import LRUPolicy
-from ctx_rm.agents.loop import AgentLoop, AgentResult
+from ctx_rm.core.scorer import HeuristicScorer
+from ctx_rm.core.segment import Segment, SegmentRole
 from ctx_rm.drivers.llamacpp import ChatResponse, ToolCall
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -191,7 +189,6 @@ class TestContentBasedRecall:
         )
         # Place it directly in warm (simulating eviction)
         bus.store.demote_to_warm(evicted_seg)
-        evicted_id = evicted_seg.seg_id
 
         # Agent does a file_read, then text response
         driver = MockDriver([
@@ -204,7 +201,7 @@ class TestContentBasedRecall:
             enable_recall=True, recall_top_k=3,
         )
 
-        result = await loop.run("sys", "Review auth code")
+        await loop.run("sys", "Review auth code")
 
         # The _try_content_recall method should exist and have been called
         assert hasattr(loop, '_try_content_recall'), (
@@ -247,7 +244,7 @@ class TestContentBasedRecall:
             enable_recall=True, recall_top_k=3,
         )
 
-        result = await loop.run("sys", "Read data")
+        await loop.run("sys", "Read data")
 
         # Should only have recalled the segment once (dedup by _recalled_ids)
         recall_count_for_id = sum(

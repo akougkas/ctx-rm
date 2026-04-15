@@ -8,10 +8,8 @@ from ctx_rm.core.scorer import Scorer
 from ctx_rm.core.scorer_sequential import (
     SequentialScorer,
     summarize_retained_set,
-    _hash,
 )
 from ctx_rm.core.segment import Segment, SegmentRole
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

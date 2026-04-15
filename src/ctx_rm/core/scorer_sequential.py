@@ -11,7 +11,8 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import structlog
 

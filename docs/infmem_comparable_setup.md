@@ -1,5 +1,10 @@
 # InfMem-Comparable Evaluation Setup
 
+> Status note: this document predates the retirement of the synthetic benchmark
+> harness. `ctx-rm bench` and `ctx-rm compare` are no longer maintained public
+> commands. Treat this file as comparison-planning notes, not as a current
+> runnable workflow.
+
 This document defines how to compare `ctx-rm` against the InfMem approach
 described in `infmem.md` in a way that is technically fair and reproducible.
 
@@ -18,7 +23,7 @@ with a different systems design:
 - tiered memory (Active/Warm/Cold/Zombie),
 - pluggable eviction/scoring policies,
 - recall path (page-fault semantics),
-- benchmark harness for agentic coding tasks.
+- trace-replay evaluation for agentic coding traces.
 
 The goal is not to claim architectural equivalence. The goal is to run
 *comparable stress tests* where claims about quality/cost trade-offs are valid.
@@ -73,21 +78,27 @@ Defined experiments:
 - `EXP-COST-001`: Full-context quality vs ctx-rm token cost
 - `EXP-NOISE-001`: Noise-heavy scenarios where filtering can outperform full-context
 
-## Execution Template
+## Current state
 
-Example run skeleton (single task):
+The maintained public evaluation surface now includes:
 
-```bash
-ctx-rm bench --task CR-001 --driver llamacpp --mode ctx-rm --policy budget --scorer heuristic
-ctx-rm bench --task CR-001 --driver llamacpp --mode ctx-rm --policy budget --scorer sequential
-ctx-rm bench --task CR-001 --driver llamacpp --mode full --scorer heuristic
-```
+- `uv run ctx-rm eval l1 ...` for trace-replay eviction quality,
+- `uv run ctx-rm eval l2 ...` for prompt-divergence replay metrics, and
+- `uv run ctx-rm eval l3 ...` for a single live `AgentLoop` run.
 
-Compare outputs:
+That closes the earlier gap where only L1 was maintained. It does not yet make
+this a like-for-like InfMem comparison: the public repo still lacks a dedicated
+cross-paper task suite and reporting bundle that matches the InfMem paper's QA
+setting.
 
-```bash
-ctx-rm compare ./results
-```
+The closest current artifact set is:
+
+- `docs/eval/l1-postB0-baseline.md`
+- `docs/eval/phaseC-implementation.md`
+- `results/b0_awoc_strict.json`
+- `results/b0_awoc_lenient.json`
+- `results/phasec_awoc_strict.json`
+- `results/phasec_awoc_lenient.json`
 
 ## Claim Gates
 

@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from ctx_rm.core.graveyard import ColdStore, StoreWriteError, TieredStore, ZombieQueue
-from ctx_rm.core.segment import Segment, SegmentRole, Tier
+from ctx_rm.core.segment import Segment, SegmentRole
 
 
 class _FailingConn:
@@ -112,9 +112,8 @@ class TestTieredStoreDurability:
             store.cold,
             "persist",
             side_effect=StoreWriteError("disk full"),
-        ):
-            with pytest.raises(StoreWriteError):
-                store.demote_to_warm(_seg("s2", "second segment content"))
+        ), pytest.raises(StoreWriteError):
+            store.demote_to_warm(_seg("s2", "second segment content"))
 
         # Both segments are still reachable from Warm
         assert store.warm.get("s1") is not None or store.warm.get("s2") is not None

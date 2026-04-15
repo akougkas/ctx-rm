@@ -1,5 +1,9 @@
 # ctx-rm Architecture
 
+> Status note: this is an early design sketch. For the current public command
+> surface and the Phase B0 evaluation stack, start with `README.md` and
+> `docs/eval/README.md`.
+
 System design for a context-removal manager that evicts low-value content from the active context while preserving evicted material in a retrievable store.
 
 ---
@@ -157,7 +161,7 @@ ctx-rm drives agents in **headless mode** via subprocess, using their subscripti
 gemini -p "<prompt>" --output-format json -m gemini-2.5-pro --yolo
 ```
 - Uses `--output-format json` for structured response parsing
-- `--yolo` mode for auto-approving tool calls during benchmarks
+- `--yolo` mode for auto-approving tool calls during automated evaluation runs
 - Token stats extracted from response JSON (`stats.models.*.tokens`)
 
 #### Claude Code
@@ -165,7 +169,7 @@ gemini -p "<prompt>" --output-format json -m gemini-2.5-pro --yolo
 claude -p "<prompt>" --output-format json --model sonnet --dangerously-skip-permissions
 ```
 - Uses `--output-format json` for structured response parsing
-- `--dangerously-skip-permissions` for auto-approval during benchmarks
+- `--dangerously-skip-permissions` for auto-approval during automated evaluation runs
 - `--max-turns` for controlling agentic loop depth
 
 ### Context Flow (Per Turn)

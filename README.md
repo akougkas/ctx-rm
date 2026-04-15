@@ -1,771 +1,312 @@
 # ctx-rm
 
-**Context Removal for LLM Agents** — a background engine that scores, evicts, and stores low-value context segments while preserving them for on-demand recall. Virtual memory semantics for LLM context windows.
+Context Removal for LLM agents: a tiered-memory runtime plus a trace-replay
+evaluation stack for studying eviction on real agent traces.
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-171%20passing-brightgreen.svg)]()
-[![v0.4](https://img.shields.io/badge/version-0.4--dev-orange.svg)]()
+## Status
 
----
+Phase B0 remains the published baseline milestone, and the repo now also
+includes the first follow-on eval work that had been deferred after B0:
 
-## Table of Contents
+- `exact_quote` matching is tightened so the verbatim run must contain the
+  gating identifier token
+- `uv run ctx-rm eval l2 ...` is now implemented
+- `uv run ctx-rm eval l3 ...` is now implemented
+- the full repo is `ruff`-clean again
 
-- [The Problem](#the-problem)
-- [How ctx-rm Works](#how-ctx-rm-works)
-- [Architecture](#architecture)
-- [Quick Start](#quick-start)
-- [CLI Reference](#cli-reference)
-- [Configuration](#configuration)
-- [Eviction Policies](#eviction-policies)
-- [Benchmark System](#benchmark-system)
-- [Project Structure](#project-structure)
-- [Extending ctx-rm](#extending-ctx-rm)
-- [Research Context](#research-context)
-- [License](#license)
+The maintained public surface in this repo is:
 
----
+- `uv run ctx-rm info`
+- `uv run ctx-rm eval l1 ...`
+- `uv run ctx-rm eval l2 ...`
+- `uv run ctx-rm eval l3 ...`
 
-## The Problem
+The older synthetic benchmark harness has been retired. Historical references
+to `ctx-rm bench`, `ctx-rm compare`, `ctx-rm experiment`, `ctx-rm analyze`,
+and `ctx-rm tasks` should not be treated as current usage.
 
-LLM coding agents like [Gemini CLI](https://github.com/google-gemini/gemini-cli) and [Claude Code](https://docs.anthropic.com/en/docs/claude-code) operate within a context window — 1M tokens for Gemini, 200K for Claude. In long multi-turn sessions, context fills up. The industry has two responses:
+## What ctx-rm is
 
-| Approach | How it works | Limitation |
-|----------|-------------|------------|
-| **Context Curation** | Carefully gate what enters context | Requires upfront decisions about relevance — hard for open-ended tasks |
-| **Context Compaction** | Summarize/compress to fit a budget | Lossy — summaries drop details that matter later |
+ctx-rm treats context like recoverable working memory instead of a write-only
+prompt buffer. New content is ingested into an active set, scored, evicted when
+the token budget is tight, and preserved in lower tiers for possible recall.
 
-**ctx-rm** explores a third path: **Context Removal**.
+The runtime pieces that implement that idea are still here:
 
-> Ingest anything. A background engine scores, evicts, and stores content from the active context. Evicted content is preserved whole and can be recalled on demand. Think of it as **virtual memory for LLM context** — page-in/page-out semantics with full recoverability.
+- `ContextBus` coordinates ingest, scoring, eviction, and recall.
+- `TieredStore` provides warm, cold, graveyard, and zombie tiers.
+- `LRU`, `CLOCK`, `BudgetAware`, `ARC`, and `InnoDB` policies plug into the
+  same bus lifecycle.
+- Heuristic and sequential scorers support policy experiments.
 
-The key insight: OS virtual memory and database buffer pools have solved this problem for decades. A page fault in Linux retrieves the exact page — no information loss. ctx-rm applies the same principle to LLM context.
+The publication-ready part of the repo today is the evaluation stack that
+replays recorded Claude Code traces through that runtime without an LLM in the
+loop and measures what each policy would have kept or evicted.
 
----
+## What the eval stack does
 
-## How ctx-rm Works
+The core replay path is L1 mechanism replay:
 
-### The Segment Lifecycle
+1. Load Claude Code JSONL transcripts from a trace directory.
+2. Normalize raw events into canonical `TraceSegment` records.
+3. Build a per-trace `ReferenceGraph` that labels which earlier segments are
+   referenced later.
+4. Replay the trace once, in event order, through `ContextBus` under a chosen
+   policy and token budget.
+5. Reduce the replay to retention, eviction, churn, and token-cost metrics, and
+   aggregate those metrics with bootstrap confidence intervals.
 
-Every piece of content entering the context window becomes a **Segment** — the atomic unit, analogous to a page in virtual memory. Each segment tracks:
+On top of that:
 
-- **Content and role** (system, user, assistant, tool)
-- **Token count** (for budget enforcement)
-- **Access pattern** (creation time, last accessed, access count)
-- **Scoring metadata** (relevance, staleness, redundancy, composite score)
-- **Tier** (where the segment currently lives)
-- **Pin state** (pinned segments are never evicted)
+- L2 reuses the same replay inputs to measure prompt divergence against the
+  recorded transcript prefix.
+- L3 runs one live `AgentLoop` session through the same `ContextBus` plumbing so
+  the maintained eval surface includes a real online path as well.
 
-Segments flow through five tiers:
+The main implementation lives in:
 
-```
-Ingest → Active → Warm → Cold → Graveyard
-                                     ↓
-            Active ← Zombie ← Cold/Graveyard   (recall = page fault)
-```
+- `src/ctx_rm/eval/trace/normalize.py`
+- `src/ctx_rm/eval/trace/reference_graph.py`
+- `src/ctx_rm/eval/l1_mechanism/runner.py`
+- `src/ctx_rm/eval/l1_mechanism/metrics.py`
+- `src/ctx_rm/eval/cli.py`
 
-### The Eviction Cycle
+Current scope:
 
-1. **Ingest**: New content enters Active. The ContextBus assigns a turn number, checks admission control (large tool outputs may bypass Active and go directly to Warm), and notifies the eviction policy via `on_ingest()`.
+- L1 is implemented and tested.
+- L2 transcript replay is implemented and tested.
+- L3 live single-run evaluation is implemented and tested.
 
-2. **Score**: The Scorer evaluates each segment's value. Two scorers are available:
-   - **HeuristicScorer**: Combines recency (exponential decay), frequency (log-scaled access count), role weight, and source weight. Fast, no external dependencies.
-   - **SequentialScorer**: Task-conditioned marginal value scoring — evaluates each segment's importance relative to the retained set AND the current task goal. Falls back to HeuristicScorer on failure. Supports pluggable LLM backends (Ollama, generic HTTP) or a built-in lexical backend.
+## What changed in Phase B0
 
-3. **Evict**: When the active context exceeds the token budget (minus a configurable headroom), the eviction policy selects segments to remove. Supports fixed batch eviction or adaptive mode (one-at-a-time near budget, batch when far over). Evicted segments move to Warm → Cold → Graveyard.
+Phase B0 is the hardening pass that turned the eval stack into the baseline for
+future policy work. The important changes are:
 
-4. **Recall**: When the agent needs evicted content, a search against Warm+Cold returns matching segments. They promote back to Active via the Zombie staging tier. Source filtering ensures only safe sources are recalled (needle, context, user_task, user_message) — never assistant/tool pairs (pair integrity).
+- The strict reference graph was rewritten around `file_reread`,
+  `file_discovery`, and tighter `exact_quote` rules.
+- The headline retention metric changed from `retention@5` to all-future
+  `retention`, with `retention@10` kept as a short-horizon companion.
+- Admission bypass became an explicit eval dial via `--bypass-modes on|off|both`.
+- Replay now tags honest repeated `tool_result` content so ARC and InnoDB get a
+  real re-access signal when previously evicted content reappears.
+- The published baseline was rerun on the post-B0 stack and committed in
+  `results/b0_awoc_strict.json` and `results/b0_awoc_lenient.json`.
 
-5. **Adapt**: The `FeedbackTracker` records eviction/recall/eval events. `AdaptiveWeights` uses this feedback to shift scoring behavior: high recall rate → conservative (boost source weights, increase headroom), zero recall rate → aggressive (decay weights, shrink headroom). This mirrors ARC's adaptive `p` parameter generalized across the full pipeline.
+## What changed after B0
 
-### Admission Control
+The next round of deferred cleanup is now in-tree as well:
 
-Not all content deserves Active tier placement. Segments from `file_read` and `tool` sources above a configurable token threshold (default: 2,000 tokens) bypass Active entirely and go directly to Warm. This prevents large file reads from evicting more valuable conversational context — the same principle as InnoDB's midpoint insertion protecting the buffer pool hot pages from full table scans.
+- `exact_quote` now requires the verbatim window itself to contain the gating
+  identifier token, which removes the main divider/header false-positive path
+  documented in the B0 validation writeup
+- L2 now reports prompt-divergence metrics against the recorded prefix
+- L3 now provides a maintained live-run entry point over `AgentLoop`
+- refreshed awoc reruns are written to
+  `results/phasec_awoc_strict.json` and `results/phasec_awoc_lenient.json`
 
----
+## Important artifacts
 
-## Architecture
+These are the files a reviewer should read first:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Benchmark Harness                              │
-│   BenchmarkRunner → TaskLoader → Evaluator                       │
-│   test_harness.py (YAML-configurable tests + A/B experiments)    │
-└──────────────────────────────┬────────────────────────────────────┘
-                               │
-                     ┌─────────▼──────────┐
-                     │     AgentLoop       │
-                     │ (autonomous agent)  │
-                     │  tools + ContextBus │
-                     └─────────┬───────────┘
-                               │
-               ┌───────────────▼──────────────────────────┐
-               │   LlamaCpp Driver (HTTP)                   │
-               │   /v1/chat/completions, retry, JSON recov. │
-               │   context window discovery                 │
-               └───────────────┬──────────────────────────┘
-       │
-┌──────▼──────────────────────────────────────────────┐
-│   ContextBus  ← Central coordinator                  │
-│   ingest, score, evict, recall, admission control    │
-│   feedback tracking, adaptive weight refresh         │
-└──┬────────┬────────┬──────────┬────────┬────────────┘
-   │        │        │          │        │
-   ▼        ▼        ▼          ▼        ▼
-┌───────┐┌───────┐┌───────┐┌────────┐┌──────────┐
-│Scorer ││Policy ││Watcher││Feedback││ Adaptive │
-│Heuris.││LRU/   ││Async  ││Tracker ││ Weights  │
-│Sequen.││CLOCK/ ││bg     ││events  ││ source/  │
-│Ollama ││Budget/││evict  ││recall  ││ policy   │
-│       ││ARC/   ││loop   ││eval    ││ params   │
-│       ││InnoDB ││       ││churn   ││          │
-└───────┘└──┬────┘└───────┘└────────┘└──────────┘
-            │
- ┌──────────▼──────────┐
- │   Tiered Store       │
- │                      │
- │ Active ──▶ Warm      │  (in-memory LRU cache)
- │ Warm   ──▶ Cold      │  (SQLite + embeddings)
- │ Cold   ──▶ Graveyard │  (archived, immutable)
- │                      │
- │ Warm/Cold ──▶ Zombie ──▶ Active  (recall)
- └──────────────────────┘
-```
+- [`docs/eval/README.md`](docs/eval/README.md): eval-stack overview, defaults,
+  commands, and artifact map.
+- [`docs/eval/l1-postB0-baseline.md`](docs/eval/l1-postB0-baseline.md):
+  published Phase B0 baseline on 131 awoc traces.
+- [`docs/eval/phaseB-reference-graph.md`](docs/eval/phaseB-reference-graph.md):
+  post-rewrite strict-graph precision audit.
+- [`docs/eval/phaseB0-policy-identity.md`](docs/eval/phaseB0-policy-identity.md):
+  why LRU, ARC, and InnoDB still collapse together on agent traces.
+- [`docs/eval/phaseC-implementation.md`](docs/eval/phaseC-implementation.md):
+  follow-on implementation summary after the B0 polish pass.
+- [`results/b0_awoc_strict.json`](results/b0_awoc_strict.json) and
+  [`results/b0_awoc_lenient.json`](results/b0_awoc_lenient.json): machine-readable
+  baseline outputs used by the writeup.
+- [`results/phasec_awoc_strict.json`](results/phasec_awoc_strict.json) and
+  [`results/phasec_awoc_lenient.json`](results/phasec_awoc_lenient.json):
+  refreshed reruns on the post-fix stack.
+- [`docs/eval/phaseA-findings.md`](docs/eval/phaseA-findings.md): the audit
+  record that motivated the B0 changes.
 
-### Tier System
+## Setup
 
-| Tier | OS/DB Analogy | Storage | Description |
-|------|---------------|---------|-------------|
-| **Active** | Buffer pool hot pages | In LLM context | Sent to the model each turn |
-| **Warm** | Page cache / ARC ghost list | In-memory LRU | Recently evicted, fast recall (no I/O) |
-| **Cold** | Database disk pages | SQLite + embeddings | Persistent, searchable by vector similarity or keyword |
-| **Graveyard** | WAL archive / cold storage | SQLite (archived) | Append-only, compressed, immutable |
-| **Zombie** | Page fault handler | Staging queue | Recalled content awaiting validation before re-entry |
-
-See [docs/tiered_graveyard.md](docs/tiered_graveyard.md) for the full theoretical foundation mapping LRU, LFU, CLOCK, ARC, and 2Q to LLM context management.
-
----
-
-## Quick Start
-
-### Prerequisites
-
-- **Python 3.12+** with [uv](https://docs.astral.sh/uv/)
-- **llama-server** running locally or on the network (Nemotron-3-Nano-30B recommended)
-- **Optional:** [Ollama](https://ollama.ai/) for LLM-based scoring (any model works — auto-discovered)
-
-### Install
+`ctx-rm` requires Python 3.12+ and uses `uv`.
 
 ```bash
-git clone https://github.com/akougkas/ctx-rm.git
-cd ctx-rm
-uv sync --all-extras
+uv sync --extra dev --extra eval
+uv run ctx-rm --help
+uv run ctx-rm eval l1 --help
 ```
 
-### Verify
+`uv run ctx-rm info` is useful for checking the local runtime environment, but
+it is not required for the replay-based eval path.
+
+## Important eval commands
+
+### Lightweight smoke check
+
+This runs the L1 pipeline on the committed frozen trace fixture instead of a
+full corpus:
 
 ```bash
-# Check system status, available drivers, policies, and tasks
-uv run ctx-rm info
-
-# List all 16 benchmark tasks
-uv run ctx-rm tasks
+uv run ctx-rm eval l1 \
+    --trace-dir tests/eval/fixtures \
+    --project frozen \
+    --max-traces 1 \
+    --policies oracle,lru \
+    --budgets 4000 \
+    --mode strict \
+    --bypass-modes on \
+    --min-segments 0 \
+    --min-turns 0 \
+    --min-tool-use 0 \
+    --min-rereads 0
 ```
 
-### Run Your First Benchmark
+### Published baseline rerun
+
+Strict baseline:
 
 ```bash
-# Single task — ctx-rm mode with BudgetAware policy
-uv run ctx-rm bench --task CR-001 --mode ctx-rm --policy budget
-
-# Full context baseline (no eviction)
-uv run ctx-rm bench --task CR-001 --mode full
-
-# Minimal context baseline (no history)
-uv run ctx-rm bench --task CR-001 --mode minimal
-
-# Compare results across all runs
-uv run ctx-rm compare ./results
+uv run ctx-rm eval l1 \
+    --trace-dir ~/.claude/projects/-home-akougkas-projects-awoc \
+    --project awoc \
+    --max-traces 200 \
+    --policies oracle,random,lru,clock,budget,arc,innodb \
+    --mode strict \
+    --bypass-modes both \
+    --seed 0 \
+    --json results/b0_awoc_strict.json
 ```
 
-### Run All Benchmarks
+Lenient baseline:
 
 ```bash
-# All 16 tasks × 3 modes
-uv run ctx-rm bench --all
-
-# With a specific policy
-uv run ctx-rm bench --all --policy arc
-
-# Compare everything
-uv run ctx-rm compare ./results
+uv run ctx-rm eval l1 \
+    --trace-dir ~/.claude/projects/-home-akougkas-projects-awoc \
+    --project awoc \
+    --max-traces 200 \
+    --policies oracle,random,lru,clock,budget,arc,innodb \
+    --mode lenient \
+    --bypass-modes both \
+    --seed 0 \
+    --json results/b0_awoc_lenient.json
 ```
 
----
+### Post-fix rerun
 
-## CLI Reference
-
-### `ctx-rm info`
-
-Displays system status: version, available drivers, policies, scorers, embedding providers, store configuration, loaded tasks, and token budget.
-
-### `ctx-rm tasks`
-
-Lists all 16 benchmark tasks with their ID, title, eviction pressure type, turn count, needle count, and evaluation check count.
-
-### `ctx-rm bench`
-
-Runs benchmark experiments. Supports single-task or batch-all modes.
-
-| Option | Values | Default | Description |
-|--------|--------|---------|-------------|
-| `--task` | `CR-001` through `SPEC-001` | `CR-001` | Task ID to run |
-| `--mode` | `minimal`, `ctx-rm`, `full` | `ctx-rm` | Session mode |
-| `--policy` | `lru`, `clock`, `budget`, `arc`, `innodb` | `budget` | Eviction policy (ctx-rm mode only) |
-| `--scorer` | `heuristic`, `ollama`, `sequential` | `heuristic` | Scoring strategy |
-| `--budget` | integer | `100000` | Token budget for active context |
-| `--batch-mode` | `fixed`, `adaptive` | `fixed` | Eviction batch mode |
-| `--max-turns` | integer | `30` | Max agent turns |
-| `--enable-recall` | flag | — | Enable page-fault recall from warm/cold |
-| `--live` | flag | — | Show live TUI dashboard during run |
-| `--output` | path | `results` | Output directory |
-| `--all` | flag | — | Run all tasks × 3 modes |
-
-**Output structure:**
-```
-results/
-├── CR-001/
-│   ├── minimal/
-│   │   └── llamacpp/
-│   │       └── run-1/
-│   │           ├── metrics.json        # Token usage, eviction stats
-│   │           └── evaluation.json     # Pass/fail for each check
-│   ├── ctx-rm/
-│   │   └── llamacpp/
-│   │       └── budget/
-│   │           └── run-1/
-│   │               └── ...
-│   └── full/
-│       └── llamacpp/
-│           └── run-1/
-│               └── ...
-```
-
-### `ctx-rm experiment`
-
-Runs multi-combination experiments from a YAML config. Sweeps across tasks, modes, policies, budget levels, and multiple runs.
+Strict:
 
 ```bash
-# Run a predefined experiment suite
-uv run ctx-rm experiment docs/experiments/eviction_accuracy.yaml
-
-# Experiment configs define: tasks, modes, policies, budgets, runs, scorer, recall
+uv run ctx-rm eval l1 \
+    --trace-dir ~/.claude/projects/-home-akougkas-projects-awoc \
+    --project awoc \
+    --max-traces 200 \
+    --policies oracle,random,lru,clock,budget,arc,innodb \
+    --mode strict \
+    --bypass-modes both \
+    --seed 0 \
+    --json results/phasec_awoc_strict.json
 ```
 
-### `ctx-rm analyze`
-
-Analyzes experiment results and displays evidence tables with per-EVID verdicts.
+Lenient:
 
 ```bash
-uv run ctx-rm analyze results/experiments/
+uv run ctx-rm eval l1 \
+    --trace-dir ~/.claude/projects/-home-akougkas-projects-awoc \
+    --project awoc \
+    --max-traces 200 \
+    --policies oracle,random,lru,clock,budget,arc,innodb \
+    --mode lenient \
+    --bypass-modes both \
+    --seed 0 \
+    --json results/phasec_awoc_lenient.json
 ```
 
-### `ctx-rm compare`
-
-Reads all results directories and generates a summary table showing token usage, eviction stats, and task success rate across modes, drivers, and policies.
+### L2 replay
 
 ```bash
-uv run ctx-rm compare ./results
+uv run ctx-rm eval l2 \
+    --trace-dir tests/eval/fixtures \
+    --project frozen \
+    --max-traces 1 \
+    --policies oracle,lru \
+    --budgets 4000 \
+    --mode strict \
+    --bypass-modes on \
+    --min-segments 0 \
+    --min-turns 0 \
+    --min-tool-use 0 \
+    --min-rereads 0
 ```
 
----
-
-## Configuration
-
-All settings are configurable via environment variables with the `CTX_RM_` prefix, or programmatically via the `CtxRmConfig` Pydantic settings class.
-
-### Core Settings
-
-| Setting | Env Var | Default | Description |
-|---------|---------|---------|-------------|
-| `token_budget` | `CTX_RM_TOKEN_BUDGET` | `200000` | Max tokens in active context |
-| `headroom_ratio` | `CTX_RM_HEADROOM_RATIO` | `0.15` | Fraction of budget kept free (triggers eviction at 85%) |
-| `policy` | `CTX_RM_POLICY` | `budget` | Default eviction policy |
-| `scorer` | `CTX_RM_SCORER` | `heuristic` | Scoring strategy (`heuristic` or `ollama`) |
-
-### Scorer Settings
-
-| Setting | Env Var | Default | Description |
-|---------|---------|---------|-------------|
-| `recency_halflife` | `CTX_RM_RECENCY_HALFLIFE` | `300.0` | Seconds for recency decay half-life |
-| `ollama_host` | `CTX_RM_OLLAMA_HOST` | `http://localhost:11434` | Ollama API endpoint |
-| `ollama_model` | `CTX_RM_OLLAMA_MODEL` | `None` (auto) | Preferred Ollama model (None = first available) |
-| `ollama_max_concurrent` | `CTX_RM_OLLAMA_MAX_CONCURRENT` | `4` | Max parallel Ollama scoring requests |
-
-### Storage Settings
-
-| Setting | Env Var | Default | Description |
-|---------|---------|---------|-------------|
-| `db_path` | `CTX_RM_DB_PATH` | `:memory:` | SQLite path for ColdStore (`:memory:` for in-memory) |
-| `warm_max_items` | `CTX_RM_WARM_MAX_ITEMS` | `64` | Max segments in warm cache |
-| `warm_max_tokens` | `CTX_RM_WARM_MAX_TOKENS` | `50000` | Max tokens in warm cache |
-
-### Watcher Settings
-
-| Setting | Env Var | Default | Description |
-|---------|---------|---------|-------------|
-| `watcher_interval` | `CTX_RM_WATCHER_INTERVAL` | `5.0` | Seconds between eviction checks |
-| `watcher_threshold` | `CTX_RM_WATCHER_THRESHOLD` | `0.70` | Context utilization that triggers eviction |
-
-### Example: Custom Configuration
+### L3 live run
 
 ```bash
-# Use ARC policy with Ollama scoring, larger budget, persistent store
-CTX_RM_POLICY=arc \
-CTX_RM_SCORER=ollama \
-CTX_RM_TOKEN_BUDGET=500000 \
-CTX_RM_DB_PATH=./ctx-rm.db \
-uv run ctx-rm bench --task CR-001 --mode ctx-rm
+uv run ctx-rm eval l3 \
+    --working-dir . \
+    --system-prompt "You are a careful coding agent." \
+    --task "Inspect the repository and summarize the current eval surface." \
+    --policy budget \
+    --budget 8000
 ```
 
----
+Important CLI defaults now match the published baseline setup:
 
-## Eviction Policies
+- budgets: `4000,8000,16000,32000`
+- filters: `segs>=40`, `turns>=8`, `tool_use>=8`, `rereads>=1`
+- bypass modes: `both`
+- seed: `0`
 
-ctx-rm ships with five eviction policies, all implementing the `EvictionPolicy` ABC. Each policy receives lifecycle hooks (`on_ingest`, `on_access`, `on_evict`) called by the ContextBus as segments move through tiers.
+## Metrics and controls
 
-### LRU (Least Recently Used)
+The L1 tables report:
 
-The simplest policy. Evicts the segment with the oldest `last_accessed` timestamp first. Good baseline, but blind to frequency and content importance.
+- `retention`: all-future critical-segment retention
+- `retention@10`: short-horizon retention
+- `eviction_precision`
+- `eviction_recall`
+- `churn_rate`
+- `tokens_evicted`
+
+Policy controls used in the tables:
+
+- `oracle`: upper bound under the current reference graph
+- `random`: lower-bound control
+- `lru`, `clock`, `budget`, `arc`, `innodb`: evaluated policies
+
+## Repo map
+
+```text
+src/ctx_rm/core/          runtime primitives: bus, store, policies, scorers
+src/ctx_rm/eval/          trace loading, reference graph, L1 replay, stats, CLI
+tests/eval/               eval unit and regression tests
+docs/eval/                Phase A/B0 writeups and audit artifacts
+results/                  committed A5 and B0 baseline JSON outputs
+```
+
+## Developer checks
+
+For eval and runtime changes:
 
 ```bash
-uv run ctx-rm bench --task CR-001 --mode ctx-rm --policy lru
+uv run pytest -q
+uv run ruff check src/ctx_rm tests
 ```
 
-### CLOCK (Second Chance)
-
-PostgreSQL-style clock sweep. Each segment gets a reference bit set on access. The clock hand sweeps; segments with the bit set get a second chance (bit cleared), while segments without it are evicted. Approximates LRU with lower overhead.
+For doc-only work, validate the command surface with:
 
 ```bash
-uv run ctx-rm bench --task CR-001 --mode ctx-rm --policy clock
+uv run ctx-rm --help
+uv run ctx-rm eval l1 --help
 ```
 
-### BudgetAware (Default)
-
-Composite scoring policy. Delegates to the active Scorer to compute relevance/staleness/redundancy scores, then evicts segments with the lowest composite score. Falls back to LRU ordering when scores are equal. This is the recommended default — it balances recency, frequency, and role importance.
-
-```bash
-uv run ctx-rm bench --task CR-001 --mode ctx-rm --policy budget
-```
-
-### ARC (Adaptive Replacement Cache)
-
-Based on the [ARC paper](https://www.usenix.org/conference/fast-03/arc-self-tuning-low-overhead-replacement-cache) by Megiddo & Modha. Maintains four lists:
-
-- **T1**: Segments seen once recently (recency list)
-- **T2**: Segments seen multiple times recently (frequency list)
-- **B1**: Ghost entries for recently evicted T1 segments
-- **B2**: Ghost entries for recently evicted T2 segments
-
-An adaptive parameter `p` shifts the balance between recency and frequency based on ghost hits. A B1 hit means recency should be favored (increase p); a B2 hit means frequency should be favored (decrease p). Ghost lists store only `seg_id` and `token_count` — no content, per the original paper.
-
-```bash
-uv run ctx-rm bench --task CR-001 --mode ctx-rm --policy arc
-```
-
-### InnoDB (Split LRU with Midpoint Insertion)
-
-Inspired by MySQL InnoDB's buffer pool management. Maintains two sublists:
-
-- **New (young)**: Protected sublist for frequently accessed segments
-- **Old**: Insertion point for new segments
-
-New segments enter at the **midpoint** (3/8 = 37.5%, matching InnoDB's `innodb_old_blocks_pct=37`). A segment only promotes from old to new on **re-access** — a single access is not enough. This prevents scan pollution: a large file read that touches many segments won't flush the hot working set from the new sublist.
-
-```bash
-uv run ctx-rm bench --task CR-001 --mode ctx-rm --policy innodb
-```
-
----
-
-## Benchmark System
-
-The benchmark system evaluates whether intelligent context removal can match full-context quality at lower token cost. It drives real LLM agents through multi-turn coding tasks with needle injection and noise generation, then evaluates the results.
-
-### Three Session Modes
-
-| Mode | Strategy | What it tests |
-|------|----------|--------------|
-| **Minimal** | Only current turn prompt, no history | Lower bound on quality, upper bound on efficiency |
-| **ctx-rm** | Greedy ingest + background removal + recall | The hypothesis: removal matches full-context quality at minimal cost |
-| **Full** | Accumulate everything, no management | Upper bound on quality, lower bound on efficiency |
-
-### Task Design
-
-16 benchmark tasks test different eviction pressure patterns:
-
-| Task | Title | Pressure Pattern |
-|------|-------|-----------------|
-| CR-001 | Legacy Flag Cascade | Gradual buildup |
-| CR-002 | Migration Order Sensitivity | Interleaved noise |
-| CR-003 | Protocol Handshake Sequence | Sudden injection |
-| CR-004 | Log Spam Diagnosis | Gradual buildup |
-| CR-005 | Generated Code Noise | Sudden injection |
-| CR-006 | Dependency Tree Shock | Sudden injection |
-| CR-007 | Alternating API Clients | Interleaved noise |
-| CR-008 | Refactor Outdated Comments | Gradual buildup |
-| CR-009 | Test Harness Clue | Interleaved noise |
-| CR-010 | Multi Issue Thread | Sudden injection |
-| MULTI-001 | Cross-file Constraint | Sudden injection |
-| TRACE-001 | Bug Hunt in Log Noise | Sudden injection |
-| SPEC-001 | Config Synthesis from Spec | Sudden injection |
-| SCALE-001 | Multi-department Analytics | High volume (20K tokens) |
-| SCALE-002 | Cross-reference Reconciliation | High volume (30K tokens) |
-| SCALE-003 | Information Synthesis | High volume (40K tokens) |
-
-Each task contains:
-- **Needles**: Critical facts/code injected at specific turns that must be retained
-- **Noise**: Synthetic content injected at specific turns to pressure eviction
-- **Evaluation checks**: File assertions run against the fixture directory after all turns complete
-
-### Evaluation Assertions
-
-Four assertion types verify agent output against fixture files:
-
-| Assertion | Description |
-|-----------|-------------|
-| `file_contains` | File must contain a specified string |
-| `file_not_contains` | File must not contain a specified string |
-| `file_contains_in_order` | Strings must appear in the file in specified order |
-| `file_equals` | File must contain a specified substring (must-preserve content) |
-
-### Metrics Captured
-
-Each benchmark run produces:
-
-- **metrics.json**: Per-turn snapshots of active tokens, utilization, warm/cold counts; full eviction log with scores, reasons, and timing; recall events with source tier; ingestion timeline by role/source; agent response token counts per turn
-- **evaluation.json**: Pass/fail for each assertion check
-- **response_log.jsonl**: Full agent responses for every turn (append-only JSONL)
-
----
-
-## Project Structure
-
-```
-ctx-rm/
-├── pyproject.toml                           # Project config, deps, CLI entry point
-├── README.md                                # This file
-│
-├── src/ctx_rm/
-│   ├── __init__.py                          # Package root, version
-│   ├── config.py                            # CtxRmConfig (Pydantic settings, CTX_RM_ env prefix)
-│   │
-│   ├── core/                                # Engine internals
-│   │   ├── segment.py                       # Segment model (Pydantic), Tier enum, SegmentRole enum
-│   │   ├── bus.py                           # ContextBus — central coordinator (ingest/score/evict/recall)
-│   │   ├── graveyard.py                     # TieredStore — WarmCache, ColdStore (SQLite), ZombieQueue
-│   │   ├── scorer.py                        # Scorer ABC, HeuristicScorer (recency + frequency + role)
-│   │   ├── scorer_sequential.py             # SequentialScorer — task-aware conditional scoring
-│   │   ├── adaptive.py                      # AdaptiveWeights — feedback-driven scoring adaptation
-│   │   ├── feedback.py                      # FeedbackTracker — eviction/recall/eval event log
-│   │   ├── tokenizer.py                     # tiktoken cl100k_base with char/4 fallback
-│   │   ├── embedding.py                     # EmbeddingProvider ABC, HashingEmbeddingProvider, cosine_similarity_batch
-│   │   └── policies/                        # Eviction policy implementations
-│   │       ├── base.py                      # EvictionPolicy ABC (select_evictions + lifecycle hooks)
-│   │       ├── lru.py                       # LRUPolicy
-│   │       ├── clock.py                     # ClockPolicy (PostgreSQL-style second chance)
-│   │       ├── budget.py                    # BudgetAwarePolicy (composite score + LRU fallback)
-│   │       ├── arc.py                       # ARCPolicy (T1/T2 + B1/B2 ghost lists, adaptive p)
-│   │       └── innodb.py                    # InnoDBPolicy (split LRU, midpoint insertion at 3/8)
-│   │
-│   ├── watch/
-│   │   └── watcher.py                       # Async background eviction (interval/threshold/per-turn/hybrid)
-│   │
-│   ├── agents/                              # Autonomous agent loop
-│   │   ├── loop.py                          # AgentLoop — driver + tools + ContextBus + pair integrity
-│   │   └── tools.py                         # 6 sandboxed tools (read_file, write_file, list_dir, etc.)
-│   │
-│   ├── drivers/                             # Agent drivers
-│   │   └── llamacpp.py                      # HTTP driver for llama-server (retry, JSON recovery)
-│   │
-│   ├── benchmarks/                          # Benchmark harness
-│   │   ├── models.py                        # BenchmarkSuite, Task, Needle, EvalCheck (Pydantic v2)
-│   │   ├── loader.py                        # TaskLoader — YAML → validated BenchmarkSuite
-│   │   ├── executor.py                      # TurnExecutor — builds multi-turn sequences with needle/noise
-│   │   ├── fixtures.py                      # FixtureManager — copy fixture dirs to temp for isolation
-│   │   ├── evaluator.py                     # Evaluator — runs file assertions (4 types)
-│   │   └── runner.py                        # BenchmarkRunner (3 modes, AgentLoop-based)
-│   │
-│   ├── integrations/                        # Optional integrations
-│   │   ├── sentence_transformers.py         # SentenceTransformerProvider (optional dep)
-│   │   ├── ollama_scorer.py                 # OllamaScorer — LLM scoring via local Ollama
-│   │   └── llm_scoring_backend.py           # Pluggable LLM scoring helpers for SequentialScorer
-│   │
-│   ├── telemetry/
-│   │   └── metrics.py                       # MetricsCollector — per-turn snapshots, JSON export
-│   │
-│   └── cli/
-│       ├── main.py                          # Typer CLI — info, tasks, bench, compare commands
-│       └── tui.py                           # Live TUI dashboard + post-run Rich summary
-│
-├── tests/                                   # 171 tests across 6 files
-│   ├── core/                                # Bus, graveyard, sequential scorer
-│   ├── agents/                              # AgentLoop, recall, pair integrity
-│   ├── integration/                         # End-to-end pipeline tests (17 tests)
-│   ├── test_harness.py                      # Consolidated harness (YAML-configurable)
-│   └── configs/                             # YAML test configurations
-│
-├── benchmarks/
-│   └── fixtures/                            # 16 mini-repo fixtures (one per task)
-│       ├── legacy_flag_cascade/
-│       ├── migration_order_sensitivity/
-│       ├── protocol_handshake_sequence/
-│       ├── log_spam_diagnosis/
-│       ├── generated_code_noise/
-│       ├── dependency_tree_shock/
-│       ├── alternating_api_clients/
-│       ├── refactor_outdated_comments/
-│       ├── test_harness_clue/
-│       └── multi_issue_thread/
-│
-└── docs/
-    ├── architecture.md                      # System design document
-    ├── tiered_graveyard.md                  # Theoretical foundation (OS/DB → LLM mapping)
-    ├── competitive_analysis.md              # MemAct, SWE-Pruner, ACON comparison
-    ├── landscape.md                         # Research bibliography
-    ├── context_removal_benchmark_tasks.yaml # 16 task definitions (YAML)
-    └── experiments/                         # YAML experiment configs
-        ├── eviction_accuracy.yaml           # BudgetAware vs LRU across SCALE tasks
-        ├── recall_effectiveness_on.yaml     # Recall on vs off
-        ├── recall_effectiveness_off.yaml    # Recall disabled baseline
-        ├── budget_sensitivity.yaml          # Budget sweep (1K-100K tokens)
-        ├── noise_degradation.yaml           # ctx-rm vs full across diverse tasks
-        └── context_window_scaling.yaml      # Quality at increasing budget levels
-```
-
----
-
-## Extending ctx-rm
-
-### Adding a New Eviction Policy
-
-1. Create `src/ctx_rm/core/policies/my_policy.py`:
-
-```python
-from ctx_rm.core.policies.base import EvictionPolicy
-from ctx_rm.core.segment import Segment
-
-
-class MyPolicy(EvictionPolicy):
-    @property
-    def name(self) -> str:
-        return "my_policy"
-
-    def select_evictions(
-        self, candidates: list[Segment], tokens_to_free: int
-    ) -> list[Segment]:
-        # Your eviction logic here
-        ranked = sorted(candidates, key=lambda s: your_score(s))
-        return self._fill_to_budget(ranked, tokens_to_free)
-
-    # Optional lifecycle hooks — called by ContextBus
-    def on_ingest(self, seg: Segment) -> None:
-        # Track new segment arrival
-        pass
-
-    def on_access(self, seg: Segment) -> None:
-        # Track recall/access event
-        pass
-
-    def on_evict(self, seg: Segment) -> None:
-        # Clean up internal state for evicted segment
-        pass
-```
-
-2. Export it in `src/ctx_rm/core/policies/__init__.py`
-3. Register it in `_create_policy()` in `src/ctx_rm/benchmarks/runner.py`
-4. Add it to the `PolicyName` StrEnum in `src/ctx_rm/cli/main.py`
-
-### Adding a New Scorer
-
-1. Implement the `Scorer` ABC:
-
-```python
-from ctx_rm.core.scorer import Scorer
-from ctx_rm.core.segment import Segment
-
-
-class MyScorer(Scorer):
-    def score_batch(
-        self, candidates: list[Segment], context: list[Segment]
-    ) -> None:
-        for seg in candidates:
-            # Set these four fields on each segment:
-            seg.relevance_score = ...   # [0, 1]
-            seg.staleness_score = ...   # [0, 1]
-            seg.redundancy_score = ...  # [0, 1]
-            seg.composite_score = ...   # [0, 1] (weighted combination)
-```
-
-2. Register it in `_create_scorer()` in `src/ctx_rm/benchmarks/runner.py`
-3. Add it to the `ScorerName` StrEnum in `src/ctx_rm/cli/main.py`
-
-### Adding a New Embedding Provider
-
-1. Implement the `EmbeddingProvider` ABC:
-
-```python
-import numpy as np
-from ctx_rm.core.embedding import EmbeddingProvider
-
-
-class MyEmbeddingProvider(EmbeddingProvider):
-    @property
-    def name(self) -> str:
-        return "my_embeddings"
-
-    @property
-    def dimensions(self) -> int:
-        return 768  # Your embedding dimension
-
-    def embed(self, text: str) -> np.ndarray:
-        # Return L2-normalized float32 vector
-        vec = your_embed_function(text)
-        norm = np.linalg.norm(vec)
-        return (vec / norm).astype(np.float32) if norm > 0 else vec
-
-    def embed_batch(self, texts: list[str]) -> np.ndarray:
-        return np.stack([self.embed(t) for t in texts])
-```
-
-ColdStore uses `cosine_similarity_batch()` (dot product on L2-normalized vectors) for search — ensure your provider returns normalized vectors.
-
-### Running Tests
-
-```bash
-# All tests
-uv run pytest
-
-# Specific subsystem
-uv run pytest tests/core/test_bus.py -v
-
-# With coverage
-uv run pytest --cov=ctx_rm --cov-report=term-missing
-```
-
----
-
-## Results
-
-Benchmark results using Nemotron-3-Nano-30B (30B params, Q4) via llama-server:
-
-### SCALE-003: Information Synthesis (40K tokens of context)
-
-The agent must read 10 department reports and produce an executive summary with specific metrics. 40K+ tokens of source material injected into context.
-
-| | **ctx-rm** | **full** |
-|---|---|---|
-| Result | **PASS (10/10)** | **FAIL (0/10)** |
-| Turns | 11 | 30 (hit limit) |
-| Prompt tokens | **174,210** | **1,120,656** |
-| Evictions | 12 | 0 |
-| Recalls | 6 | 0 |
-| Budget | 17,677 | 1,000,000 (unlimited) |
-
-Full mode **failed** — the model got stuck in a loop, re-reading the same file for 20+ turns, drowning in 42K tokens of accumulated context per prompt. ctx-rm **passed** by evicting stale noise, recalling data on demand, and keeping each prompt under 20K tokens.
-
-### Per-turn context evolution (ctx-rm)
-
-Metrics instrumentation captures the full lifecycle per turn:
-
-| Turn | Active tokens | Utilization | Tool | What happened |
-|------|-------------|-------------|------|------|
-| 1 | 13,883 | 79% | run_shell | Listed dirs. 2 noise segments evicted at ingest |
-| 4 | 18,314 | 104% | file_read | Read finance report (5K tok). Recall triggered. Eviction fired |
-| 7 | 18,123 | 103% | file_write | Wrote summary. 5 evictions — biggest cleanup |
-| 8 | 8,798 | 50% | list_dir | Stale read context cleaned. Recall for verification |
-| 11 | 9,216 | 52% | done | Task complete. 50% recall rate (6/12) |
-
-### SPEC-001: Config Synthesis
-
-| Task | Mode | Result | Prompt Tokens | Turns | Evictions |
-|------|------|--------|--------------|-------|-----------|
-| SPEC-001 | **ctx-rm** | **PASS 2/2** | **7,151** | 6 | 1 |
-| SPEC-001 | full | PASS 2/2 | 16,707 | 7 | 0 |
-
-ctx-rm passed with **57% fewer prompt tokens** than full mode.
-
-These results use a small local model (30B Q4). The key finding: ctx-rm doesn't just save tokens — on context-heavy tasks, it **enables success** where full-context mode fails because the model can't navigate the noise.
-
----
-
-## Research Context
-
-ctx-rm is an experimental research project exploring whether background context removal with full recoverability can match full-context quality at a fraction of the token cost.
-
-### Key Hypothesis
-
-> An LLM coding agent that ingests context freely while a background removal engine manages the active window will achieve comparable task success to a full-context agent, at significantly lower token cost — and will outperform both on tasks where noise degrades performance.
-
-### Theoretical Foundation
-
-The eviction policies are direct adaptations of algorithms proven in operating systems and databases:
-
-| Algorithm | Origin | ctx-rm Adaptation |
-|-----------|--------|-------------------|
-| LRU | Every OS page replacement since 1960s | LRUPolicy |
-| CLOCK | BSD Unix, PostgreSQL buffer manager | ClockPolicy (second chance with reference bit) |
-| ARC | IBM Almaden, FAST '03 | ARCPolicy (T1/T2 + B1/B2 ghost lists) |
-| InnoDB Buffer Pool | MySQL/MariaDB | InnoDBPolicy (split LRU with midpoint insertion) |
-| Page Fault | OS virtual memory | Zombie tier → recall to Active |
-
-### Positioning
-
-```
-                Context Management Approaches
-                           │
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-        ▼                  ▼                  ▼
-  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-  │  Curation    │  │  Compaction   │  │   Removal    │
-  │  (gatekeep)  │  │  (summarize)  │  │  (evict)     │
-  └──────────────┘  └──────────────┘  └──────────────┘
-  LLMLingua,         Claude Code's     ctx-rm
-  Selective Context,  auto-compact,     (this project)
-  LangChain CE       ACON, CSIM
-```
-
-### Closest Prior Art
-
-| Project | Relationship to ctx-rm |
-|---------|----------------------|
-| [MemAct](https://github.com/YuxiangZhang0114/MemAct) | Treats memory as learnable action (RL). ctx-rm is background + agent-agnostic |
-| [SWE-Pruner](https://github.com/Ayanami1314/swe-pruner) | Code-specific pruning (inline). ctx-rm is async + multi-content-type |
-| [ACON](https://github.com/microsoft/acon) | Compression guideline optimization. ctx-rm evicts (recoverable) vs compresses (lossy) |
-| Claude Code compact | 3-tier summarization. ctx-rm preserves originals in graveyard |
-
-### Bibliography
-
-See [docs/landscape.md](docs/landscape.md) for the full bibliography including LLMLingua (EMNLP'23, ACL'24), MemGPT/Letta, Mem0, Zep, SWE-Pruner, MemAct, ACON, and LongBench evaluation benchmarks.
-
----
-
-## Design Decisions
-
-| Decision | Rationale |
-|----------|-----------|
-| **Own agent, not CLI wrapper** | AgentLoop drives llama-server via HTTP. Full control over every message and tool call |
-| **Background, not inline** | The Watcher runs as an async task. The agent is never interrupted or aware of eviction |
-| **Removal, not compression** | Segments are evicted whole (recoverable), not summarized (lossy). The Graveyard preserves exact content |
-| **Separation of concerns** | Scorer/Evictor is a separate process from the task agent — two different "brains" |
-| **Pluggable everything** | Policies, scorers, embedding providers, and drivers all implement ABCs — swap freely |
-| **SQLite for persistence** | Zero external dependencies. Embedded, sufficient for research workloads |
-| **Ollama for LLM scoring** | Local, dynamic model discovery, no API costs. Auto-discovers whatever model you have running |
-| **Feature hashing for embeddings** | Zero ML dependency default (numpy + hashlib). Optional upgrade to sentence-transformers |
-
----
-
-## License
-
-Apache-2.0 — see [LICENSE](LICENSE).
+## Background docs
+
+- [`docs/tiered_graveyard.md`](docs/tiered_graveyard.md): tiering model and
+  policy analogies.
+- [`docs/architecture.md`](docs/architecture.md): early architectural sketch.
+- [`docs/landscape.md`](docs/landscape.md): research landscape and references.
+
+Use this README and [`docs/eval/README.md`](docs/eval/README.md) as the
+authoritative starting point for current commands and the Phase B0 evaluation
+story.

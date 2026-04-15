@@ -120,13 +120,16 @@ def make_generic_scoring_fn(
 ) -> Callable[[str, str, str], dict[str, float] | None]:
     """Wrap a raw-text backend callable into validated score dict output."""
 
-    def _score(segment_content: str, retained_summary: str, task_goal: str) -> dict[str, float] | None:
+    def _score(
+        segment_content: str,
+        retained_summary: str,
+        task_goal: str,
+    ) -> dict[str, float] | None:
         try:
             raw = fn(segment_content, retained_summary, task_goal)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug("generic_backend_call_failed", error=str(exc))
             return None
         return _parse_score_json(raw)
 
     return _score
-

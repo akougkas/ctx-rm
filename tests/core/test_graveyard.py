@@ -180,7 +180,7 @@ def _make_cold_store_with_embeddings():
 
 
 def test_cold_store_persist_stores_embedding():
-    store, provider = _make_cold_store_with_embeddings()
+    store, _provider = _make_cold_store_with_embeddings()
     seg = _make_seg("python authentication handler")
     store.persist(seg)
 

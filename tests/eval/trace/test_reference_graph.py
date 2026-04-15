@@ -186,8 +186,8 @@ class TestExactQuoteEdge:
                 1,
                 1,
                 TraceSegmentKind.ASSISTANT_TEXT,
-                "Looking at authenticate_user_with_token, it returns a JWT "
-                "bearer after validating the signature.",
+                "The fix confirms authenticate_user_with_token returns a JWT "
+                "bearer after validating the signature against the public key.",
             ),
         ]
         graph = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
@@ -215,6 +215,62 @@ class TestExactQuoteEdge:
         ]
         graph = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
         assert ReferenceEdgeKind.EXACT_QUOTE not in {e.kind for e in graph.edges}
+
+
+class TestExactQuoteTokenWindowGuard:
+    def test_verbatim_run_must_contain_gating_token(self) -> None:
+        result_text = (
+            "Dispatch pipeline observer\n"
+            "====================\n"
+            "The module coordinates replay-time policy routing."
+        )
+        segs = [
+            _seg(
+                "tr1",
+                0,
+                0,
+                TraceSegmentKind.TOOL_RESULT,
+                result_text,
+                tool_use_id="id1",
+            ),
+            _seg(
+                "at1",
+                1,
+                1,
+                TraceSegmentKind.ASSISTANT_TEXT,
+                "Dispatch was part of the analysis summary.\n"
+                "====================\n"
+                "I noted the module but did not quote its body.",
+            ),
+        ]
+        graph = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        assert ReferenceEdgeKind.EXACT_QUOTE not in {e.kind for e in graph.edges}
+
+    def test_verbatim_run_with_gating_token_still_matches(self) -> None:
+        result_text = (
+            "Dispatch pipeline observer ensures the replay signal stays aligned "
+            "with the policy lifecycle hooks."
+        )
+        segs = [
+            _seg(
+                "tr1",
+                0,
+                0,
+                TraceSegmentKind.TOOL_RESULT,
+                result_text,
+                tool_use_id="id1",
+            ),
+            _seg(
+                "at1",
+                1,
+                1,
+                TraceSegmentKind.ASSISTANT_TEXT,
+                "I confirmed that Dispatch pipeline observer ensures the "
+                "replay signal stays aligned during the run.",
+            ),
+        ]
+        graph = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        assert ReferenceEdgeKind.EXACT_QUOTE in {e.kind for e in graph.edges}
 
 
 class TestExactQuoteSourceGuard:
@@ -388,8 +444,8 @@ class TestAmbientTokenFilter:
                 1,
                 2,
                 TraceSegmentKind.ASSISTANT_TEXT,
-                f"Looking at {unique}, it returns a JWT bearer token "
-                f"after validating the signature.",
+                f"The analysis confirms {unique} returns a JWT bearer token "
+                f"after validating the signature against the public key.",
             ),
         ]
         g = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)

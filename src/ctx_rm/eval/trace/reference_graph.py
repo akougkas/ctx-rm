@@ -441,10 +441,20 @@ class ReferenceGraph:
                 break
         if gating_token is None:
             return False
-        for start in range(0, max(1, len(excerpt) - MIN_EXACT_QUOTE_CHARS), 64):
-            chunk = excerpt[start : start + MIN_EXACT_QUOTE_CHARS]
-            if chunk and chunk in target_body:
-                return True
+        window_len = max(MIN_EXACT_QUOTE_CHARS, len(gating_token))
+        excerpt_len = len(excerpt)
+        if excerpt_len < window_len:
+            return False
+
+        token_start = excerpt.find(gating_token)
+        while token_start != -1:
+            min_start = max(0, token_start - (window_len - len(gating_token)))
+            max_start = min(token_start, excerpt_len - window_len)
+            for start in range(min_start, max_start + 1):
+                chunk = excerpt[start : start + window_len]
+                if chunk in target_body:
+                    return True
+            token_start = excerpt.find(gating_token, token_start + 1)
         return False
 
     def _rule_ngram_overlap(self) -> None:

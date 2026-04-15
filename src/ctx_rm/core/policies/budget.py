@@ -4,7 +4,6 @@ Combines a scoring signal (composite_score from the Scorer) with a hard
 token budget. Evicts the lowest-scoring segments first until budget is met.
 
 When no scores are available, falls back to LRU ordering.
-This is the recommended default policy for ctx-rm benchmarks.
 """
 
 from __future__ import annotations

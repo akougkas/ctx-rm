@@ -207,7 +207,11 @@ marimo/_lsp/
 __marimo__/
 
 # ctx-rm specific
-results/
+results/**
+!results/b0_awoc_strict.json
+!results/b0_awoc_lenient.json
+!results/phasec_awoc_strict.json
+!results/phasec_awoc_lenient.json
 *.db
 .planning/
 .code/

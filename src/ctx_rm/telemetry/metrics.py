@@ -1,6 +1,6 @@
 """MetricsCollector: tracks token usage, eviction stats, and recall patterns.
 
-This is a first-class citizen of ctx-rm — designed for the research benchmarks.
+This is a first-class citizen of ctx-rm for evaluation and runtime inspection.
 Every event is recorded with timestamps for post-hoc analysis.
 """
 
@@ -74,7 +74,7 @@ class IngestEvent:
 
 
 class MetricsCollector:
-    """Collects and exports benchmark metrics.
+    """Collects and exports evaluation metrics.
 
     Designed to be attached to a ContextBus and record all events
     for post-hoc analysis in Jupyter notebooks.

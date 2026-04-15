@@ -117,7 +117,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "File path to write to (must be within the working directory).",
+                        "description": (
+                            "File path to write to (must be within the "
+                            "working directory)."
+                        ),
                     },
                     "content": {
                         "type": "string",

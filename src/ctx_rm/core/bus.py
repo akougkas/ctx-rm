@@ -39,7 +39,8 @@ class ContextBus:
     """Central coordinator for context removal.
 
     Manages the flow of segments across tiers and enforces token budgets.
-    Designed to sit between the benchmark harness and the CLI agent drivers.
+    Designed to sit between an agent loop or replay harness and the
+    model-facing driver layer.
     """
 
     def __init__(

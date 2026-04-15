@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from ctx_rm.core.scorer import HeuristicScorer
 from ctx_rm.core.scorer_sequential import SequentialScorer
 from ctx_rm.core.segment import Segment, SegmentRole

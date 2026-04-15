@@ -75,7 +75,7 @@ class EvictionPolicy(ABC):
         """
         if tokens_to_free <= 0:
             return 0
-        scaled = int(round(tokens_to_free * self._aggressiveness))
+        scaled = round(tokens_to_free * self._aggressiveness)
         return max(tokens_to_free, scaled)
 
     def _fill_to_budget(self, ranked: list[Segment], tokens_to_free: int) -> list[Segment]:
@@ -95,15 +95,15 @@ class EvictionPolicy(ABC):
 
     def on_ingest(self, seg: Segment) -> None:
         """Called when a segment is ingested into active context."""
-        pass
+        return None
 
     def on_access(self, seg: Segment) -> None:
         """Called when a segment is recalled/accessed."""
-        pass
+        return None
 
     def on_evict(self, seg: Segment) -> None:
         """Called when a segment is evicted from active context."""
-        pass
+        return None
 
     def _reason(self, seg: Segment) -> str:
         """Default eviction reason — subclasses can override."""

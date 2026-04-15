@@ -1,129 +1,250 @@
 # ctx-rm evaluation suite
 
-Three-tier methodology for measuring eviction-policy quality. The current
-implementation covers L1 only; L2 and L3 are planned.
+Phase B0-ready guide to the maintained evaluation stack.
 
-## Design
+## Scope
 
-- **L1 — Mechanism tests.** Deterministic replay of recorded agent traces
-  through `ContextBus`, no LLM. Reports eviction precision / recall,
-  critical-segment retention, and churn against oracle and random controls.
-  Pure functions: the same trace + policy + budget always produces the same
-  metrics. Runs in CI.
-- **L2 — Transcript replay** (not yet implemented). Replay a recorded trace
-  and compare the context ctx-rm would have sent the model against what the
-  recorded agent actually saw, measuring prompt divergence and critical-
-  segment retention under counterfactual rendering.
-- **L3 — Live end-to-end** (not yet implemented). Real LLM runs with
-  bootstrap CIs, budget sweeps, and executable assertion checks on
-  fixture repositories.
+The public eval surface today is:
 
-## Trace corpus
+- `uv run ctx-rm eval l1 ...`
+- `uv run ctx-rm eval l2 ...`
+- `uv run ctx-rm eval l3 ...`
 
-Traces are Claude Code JSONL session transcripts, discovered via
-`discover_transcripts(~/.claude/projects/<project>/)`. Every `.jsonl` under
-that tree is a full agent trace (main session or subagent). Currently
-supported event types:
+Current implementation status:
 
-- `user` — user prompt (string content) or tool_result carrier (list content)
-- `assistant` — text / thinking / tool_use blocks
-- `system` — system messages
-- `attachment` — dropped-in file content
+- L1 mechanism replay is implemented and tested.
+- L2 transcript replay is implemented and tested.
+- L3 live single-run evaluation is implemented and tested.
 
-Unsupported types (`permission-mode`, `file-history-snapshot`, `progress`)
-are counted in `skipped_types` and ignored by the normalizer.
+This directory contains the audit trail and published artifacts behind the
+Phase B0 baseline. Use this file as the map; use the linked writeups for the
+details.
 
-## Reference graph — the oracle labeler
+## What L1 does
 
-For every segment X in a trace, we compute whether some later segment Y
-references X. Two modes:
+L1 is deterministic trace replay through the real ctx-rm runtime:
 
-- **strict** — high-precision. Only `file_reread` and `exact_quote` edges.
-- **lenient** — adds 5-token non-stopword n-gram overlap edges. Noisier but
-  catches paraphrases.
+1. Discover Claude Code JSONL transcripts under a trace directory.
+2. Normalize raw events into canonical `Trace` / `TraceSegment` objects.
+3. Build a `ReferenceGraph` in `strict` or `lenient` mode.
+4. Replay the trace once through `ContextBus` with a chosen policy, token
+   budget, and bypass setting.
+5. Reduce the replay to per-trace metrics, then aggregate with 95% bootstrap
+   confidence intervals across traces.
 
-From these edges we derive `is_referenced_after(seg_id, turn) -> bool`,
-which is the ground-truth label for the L1 metrics. The OraclePolicy uses
-the same labels to make optimal eviction decisions (upper bound).
+The key modules are:
 
-## Metrics
+- `src/ctx_rm/eval/trace/normalize.py`
+- `src/ctx_rm/eval/trace/reference_graph.py`
+- `src/ctx_rm/eval/l1_mechanism/runner.py`
+- `src/ctx_rm/eval/l1_mechanism/metrics.py`
+- `src/ctx_rm/eval/cli.py`
 
-| Metric | Definition |
-|---|---|
-| eviction precision | &#124;evicted ∩ unreferenced&#124; / &#124;evicted&#124; |
-| eviction recall | &#124;evicted ∩ unreferenced&#124; / &#124;unreferenced_ever_active&#124; |
-| critical_segment_retention@k | mean over turns of: fraction of segments referenced in [t+1, t+k] still in active context |
-| churn_rate | fraction of evictions that got recalled |
-| tokens_evicted / tokens_recalled | cost proxies |
+## What changed in Phase B0
 
-All deltas are reported with 95% percentile-bootstrap confidence intervals
-over the trace corpus (`bootstrap_mean_ci`, seed-pinned).
+Phase B0 hardened both the labeler and the replay story:
 
-## Controls
+- strict-mode reference edges now center on `file_reread`, `file_discovery`,
+  and a tighter `exact_quote` rule
+- the headline metric is now all-future `retention`; `retention@10` remains as
+  the short-horizon companion
+- admission bypass is now explicit via `--bypass-modes on|off|both`
+- replay tags honest repeated `tool_result` content reappearance so ARC and
+  InnoDB can react when evicted content genuinely returns
+- the awoc baseline was rerun on the post-B0 stack and committed
 
-- **OraclePolicy** — upper bound. Uses the reference graph to evict only
-  segments that will never be referenced again; among referenced segments
-  it picks the furthest-future ones first.
-- **RandomPolicy** — lower bound. Uniform random selection with a fixed
-  seed so runs are reproducible.
+The old `retention@5` / 59-trace framing should be treated as historical only.
 
-## Running it
+## What changed after B0
+
+Follow-on deferred work now landed as well:
+
+- `exact_quote` requires the matched verbatim window to contain the gating
+  identifier token
+- L2 is implemented as prompt-divergence replay against the recorded prefix
+- L3 is implemented as a maintained live-run entry point over `AgentLoop`
+- the awoc corpus has refreshed reruns in
+  `results/phasec_awoc_strict.json` and `results/phasec_awoc_lenient.json`
+
+## Current default eval settings
+
+The CLI defaults now encode the published baseline setup:
+
+- policies: `oracle,random,lru,clock,budget,arc,innodb`
+- budgets: `4000,8000,16000,32000`
+- mode: `strict` unless overridden
+- bypass modes: `both`
+- seed: `0`
+- corpus filter: `segs>=40`, `turns>=8`, `tool_use>=8`, `rereads>=1`
+
+The CLI prints a filter-cascade line so runs record how many traces survived
+those defaults.
+
+## Important commands
+
+### CLI help
+
+```bash
+uv run ctx-rm eval l1 --help
+```
+
+### Fixture smoke run
+
+Use the committed frozen trace for a fast end-to-end check:
 
 ```bash
 uv run ctx-rm eval l1 \
-    --trace-dir ~/.claude/projects/-home-akougkas-projects-ctx-rm \
-    --project ctx-rm \
-    --policies oracle,random,lru,clock,budget,arc,innodb \
-    --budgets 8000,32000,128000 \
+    --trace-dir tests/eval/fixtures \
+    --project frozen \
+    --max-traces 1 \
+    --policies oracle,lru \
+    --budgets 4000 \
     --mode strict \
-    --min-segments 30 \
-    --json results/l1_ctxrm_strict.json
+    --bypass-modes on \
+    --min-segments 0 \
+    --min-turns 0 \
+    --min-tool-use 0 \
+    --min-rereads 0
 ```
 
-## Current findings (n=59 awoc traces, strict mode, budget=8000)
+### Published awoc baseline
 
-| policy | retention@5 | 95% CI |
-|---|---|---|
-| **oracle** | **0.898** | [0.871, 0.922] |
-| lru / arc / innodb | 0.856 | [0.828, 0.880] |
-| clock | 0.852 | [0.825, 0.878] |
-| random | 0.842 | [0.812, 0.868] |
-| budget | 0.815 | [0.780, 0.846] |
+Strict:
 
-Key observations:
-
-1. Oracle leaves ~4 pp of retention headroom above LRU — a real policy can
-   still improve.
-2. `BudgetAwarePolicy` with the default `HeuristicScorer` is statistically
-   *worse* than random. The scorer penalizes `assistant` and `tool` role
-   segments, which are exactly the tool_result blocks the agent will need
-   again. The default scorer is mis-calibrated.
-3. `LRU = ARC = InnoDB` to four decimal places. ARC's adaptive
-   recency/frequency split and InnoDB's midpoint insertion reduce to LRU
-   on Claude Code traces, because these traces don't exhibit the
-   scan-vs-reuse pattern those policies were designed for.
-4. No-pressure control (budget=128k) yields `retention@5 ≈ 0.905` for every
-   policy. The ceiling below 1.0 is imposed by `ContextBus` admission
-   bypass (large file_read/tool segments routed straight to Warm).
-
-## File layout
-
-```
-src/ctx_rm/eval/
-├── trace/
-│   ├── schema.py              # Trace + TraceSegment models
-│   ├── claude_code.py         # JSONL loader
-│   ├── normalize.py           # Claude Code → canonical segments
-│   └── reference_graph.py     # Oracle labeler (strict + lenient)
-├── controls/
-│   ├── oracle.py              # Upper-bound policy
-│   └── random_policy.py       # Lower-bound policy
-├── l1_mechanism/
-│   ├── runner.py              # Deterministic replay through ContextBus
-│   └── metrics.py             # Pure-function metric reducers
-├── stats/
-│   └── bootstrap.py           # Percentile bootstrap CIs
-└── cli.py                     # `ctx-rm eval l1 ...`
+```bash
+uv run ctx-rm eval l1 \
+    --trace-dir ~/.claude/projects/-home-akougkas-projects-awoc \
+    --project awoc \
+    --max-traces 200 \
+    --policies oracle,random,lru,clock,budget,arc,innodb \
+    --mode strict \
+    --bypass-modes both \
+    --seed 0 \
+    --json results/b0_awoc_strict.json
 ```
 
-Tests live under `tests/eval/` with the same structure.
+Lenient:
+
+```bash
+uv run ctx-rm eval l1 \
+    --trace-dir ~/.claude/projects/-home-akougkas-projects-awoc \
+    --project awoc \
+    --max-traces 200 \
+    --policies oracle,random,lru,clock,budget,arc,innodb \
+    --mode lenient \
+    --bypass-modes both \
+    --seed 0 \
+    --json results/b0_awoc_lenient.json
+```
+
+Those JSON outputs are already committed. Read them or the published markdown
+before deciding to rerun expensive corpus jobs.
+
+### Post-fix awoc rerun
+
+Strict:
+
+```bash
+uv run ctx-rm eval l1 \
+    --trace-dir ~/.claude/projects/-home-akougkas-projects-awoc \
+    --project awoc \
+    --max-traces 200 \
+    --policies oracle,random,lru,clock,budget,arc,innodb \
+    --mode strict \
+    --bypass-modes both \
+    --seed 0 \
+    --json results/phasec_awoc_strict.json
+```
+
+Lenient:
+
+```bash
+uv run ctx-rm eval l1 \
+    --trace-dir ~/.claude/projects/-home-akougkas-projects-awoc \
+    --project awoc \
+    --max-traces 200 \
+    --policies oracle,random,lru,clock,budget,arc,innodb \
+    --mode lenient \
+    --bypass-modes both \
+    --seed 0 \
+    --json results/phasec_awoc_lenient.json
+```
+
+### L2 replay
+
+```bash
+uv run ctx-rm eval l2 \
+    --trace-dir tests/eval/fixtures \
+    --project frozen \
+    --max-traces 1 \
+    --policies oracle,lru \
+    --budgets 4000 \
+    --mode strict \
+    --bypass-modes on \
+    --min-segments 0 \
+    --min-turns 0 \
+    --min-tool-use 0 \
+    --min-rereads 0
+```
+
+### L3 live run
+
+```bash
+uv run ctx-rm eval l3 \
+    --working-dir . \
+    --system-prompt "You are a careful coding agent." \
+    --task "Inspect the repository and summarize the current eval surface." \
+    --policy budget \
+    --budget 8000
+```
+
+## Headline Phase B0 findings
+
+For the historical post-B0 awoc baseline:
+
+- 131 traces survive the published filter cascade
+- LRU, ARC, and InnoDB remain effectively tied on real agent traces even after
+  the replay-time re-access fix
+- oracle retains clear headroom at working-set budgets
+- `BudgetAwarePolicy` remains weakest in strict mode at lower budgets
+- strict graph hardening improved the labeler, but the B0 writeup still records
+  `exact_quote` as a held-out validation limitation; the follow-on fix is
+  documented separately in `phaseC-implementation.md`
+
+See the linked docs below for the exact tables and caveats.
+
+## Artifact map
+
+- [`l1-postB0-baseline.md`](l1-postB0-baseline.md): published L1 baseline on
+  131 awoc traces, including strict and lenient tables
+- [`phaseB-reference-graph.md`](phaseB-reference-graph.md): post-rewrite
+  precision audit for the strict reference graph
+- [`phaseB0-policy-identity.md`](phaseB0-policy-identity.md): investigation of
+  why LRU, ARC, and InnoDB collapse together on agent traces
+- [`phaseC-implementation.md`](phaseC-implementation.md): concise summary of
+  the post-B0 follow-on work
+- [`phaseA-findings.md`](phaseA-findings.md): the pre-B0 audit that motivated
+  the hardening work
+- [`phaseB0_validation_split.json`](phaseB0_validation_split.json): locked
+  tuning/validation split used during the graph rewrite
+- [`phaseB0_audit_tuning.jsonl`](phaseB0_audit_tuning.jsonl) and
+  [`phaseB0_audit_validation.jsonl`](phaseB0_audit_validation.jsonl): sampled
+  audit records behind the precision writeup
+- [`phaseB0_tuning_labels.md`](phaseB0_tuning_labels.md) and
+  [`phaseB0_validation_labels.md`](phaseB0_validation_labels.md): human review
+  notes for those sampled edges
+- [`../../results/phasec_awoc_strict.json`](../../results/phasec_awoc_strict.json)
+  and
+  [`../../results/phasec_awoc_lenient.json`](../../results/phasec_awoc_lenient.json):
+  refreshed machine-readable reruns on the post-fix stack
+
+## Guardrails for interpretation
+
+- The headline metric is `retention`, not `retention@5`.
+- `strict` and `lenient` are both useful; they answer different precision /
+  recall tradeoffs.
+- the B0 validation writeup remains historically accurate for the B0 graph;
+  the newer exact-quote implementation is a follow-on change and should not be
+  back-read into the B0 precision document
+- `results/b0_awoc_strict.json` and `results/b0_awoc_lenient.json` are the
+  baseline artifacts for future policy comparisons.

@@ -1,6 +1,6 @@
 """Watcher: async background eviction monitor.
 
-The Watcher runs as an asyncio task alongside the benchmark harness.
+The Watcher runs as an asyncio task alongside an agent loop or replay harness.
 It periodically checks the ContextBus and triggers eviction cycles
 based on configurable trigger policies.
 
@@ -11,6 +11,7 @@ primary agent never blocks on eviction.
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from enum import StrEnum
 from typing import Any
 
@@ -101,13 +102,11 @@ class Watcher:
                     self._last_turn = self.bus.turn_number
                     self._consecutive_failures = 0
 
-                try:
+                with suppress(TimeoutError):
                     await asyncio.wait_for(
                         self._stop_event.wait(),
                         timeout=self.config.interval_seconds,
                     )
-                except TimeoutError:
-                    pass  # Normal: timeout = interval elapsed, loop continues
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -126,13 +125,11 @@ class Watcher:
                         total_failures=self._total_failures,
                     )
                     break
-                try:
+                with suppress(TimeoutError):
                     await asyncio.wait_for(
                         self._stop_event.wait(),
                         timeout=self.config.interval_seconds,
                     )
-                except TimeoutError:
-                    pass
 
         logger.info(
             "watcher_stopped",

@@ -332,7 +332,12 @@ class AgentLoop:
                     tokens=recalled.token_count,
                 )
 
-    def _try_content_recall(self, tool_name: str, tool_args: dict[str, Any], tool_result: str) -> None:
+    def _try_content_recall(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        tool_result: str,
+    ) -> None:
         """Content-based recall: search evicted segments matching tool result content.
 
         Fires after each tool result is ingested. Catches the case where an agent
