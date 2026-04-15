@@ -85,13 +85,13 @@ A fix exists in principle — require the ≥20-char verbatim run to
 headers stop qualifying. On a 15-record sample of validation FPs this
 kills 10/15 without breaking the existing positive test (the
 `authenticate_user_with_token` case passes because a window containing
-that token is verbatim-shared). **We did not apply this fix.** The
-Phase B0 discipline (`docs/eval/phaseB0-handoff.md` and
-`phaseB0-hardening-plan.md`) forbids re-tuning after looking at the
-validation split, and the tuning-to-validation gap (17.6 pp) is far
-above the 5 pp threshold the handoff specifies for "accept validation
-and do not iterate". Applying a new tighten-up here would contaminate
-the held-out evaluation.
+that token is verbatim-shared). **We did not apply this fix during
+Phase B0.** At that point the B0 evaluation discipline forbade
+re-tuning after looking at the validation split, and the
+tuning-to-validation gap (17.6 pp) was far above the threshold where
+the correct move was "accept validation and do not iterate". Applying
+a new tighten-up there would have contaminated the held-out
+evaluation.
 
 The candidate fix is documented for Phase C. If we choose to rerun
 the audit on a freshly-sampled held-out split, that fix should ship
