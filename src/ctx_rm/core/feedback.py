@@ -30,42 +30,50 @@ class FeedbackTracker:
         return len(self._events)
 
     def on_eviction(self, segment: Segment) -> None:
-        self._events.append({
-            "type": "eviction",
-            "seg_id": segment.seg_id,
-            "source": segment.source,
-            "composite_score": segment.composite_score,
-            "token_count": segment.token_count,
-            "ts": time.time(),
-        })
+        self._events.append(
+            {
+                "type": "eviction",
+                "seg_id": segment.seg_id,
+                "source": segment.source,
+                "composite_score": segment.composite_score,
+                "token_count": segment.token_count,
+                "ts": time.time(),
+            }
+        )
 
     def on_recall(self, segment: Segment) -> None:
-        self._events.append({
-            "type": "recall",
-            "seg_id": segment.seg_id,
-            "source": segment.source,
-            "composite_score": segment.composite_score,
-            "token_count": segment.token_count,
-            "ts": time.time(),
-        })
+        self._events.append(
+            {
+                "type": "recall",
+                "seg_id": segment.seg_id,
+                "source": segment.source,
+                "composite_score": segment.composite_score,
+                "token_count": segment.token_count,
+                "ts": time.time(),
+            }
+        )
 
     def on_re_eviction(self, segment: Segment) -> None:
-        self._events.append({
-            "type": "re_eviction",
-            "seg_id": segment.seg_id,
-            "source": segment.source,
-            "composite_score": segment.composite_score,
-            "token_count": segment.token_count,
-            "ts": time.time(),
-        })
+        self._events.append(
+            {
+                "type": "re_eviction",
+                "seg_id": segment.seg_id,
+                "source": segment.source,
+                "composite_score": segment.composite_score,
+                "token_count": segment.token_count,
+                "ts": time.time(),
+            }
+        )
 
     def on_eval_result(self, check: str, passed: bool) -> None:
-        self._events.append({
-            "type": "eval",
-            "check": check,
-            "passed": passed,
-            "ts": time.time(),
-        })
+        self._events.append(
+            {
+                "type": "eval",
+                "check": check,
+                "passed": passed,
+                "ts": time.time(),
+            }
+        )
 
     def events_by_type(self, event_type: str) -> list[dict[str, Any]]:
         return [e for e in self._events if e["type"] == event_type]
@@ -78,11 +86,15 @@ class FeedbackTracker:
         recalls = sum(1 for e in self._events if e["type"] == "recall")
         return min(1.0, recalls / evictions)
 
-    def eval_pass_rate(self) -> float:
-        """Fraction of eval checks that passed (1.0 when no checks seen)."""
+    def eval_pass_rate(self) -> float | None:
+        """Fraction of eval checks that passed, or None when no checks seen.
+
+        Returning None (rather than 1.0) keeps "no data" distinguishable
+        from "all checks passed" so the adaptive controller and dashboards
+        do not silently treat an unobserved run as a perfect one.
+        """
         eval_events = [e for e in self._events if e["type"] == "eval"]
         if not eval_events:
-            return 1.0
+            return None
         passed = sum(1 for e in eval_events if e["passed"])
         return passed / len(eval_events)
-

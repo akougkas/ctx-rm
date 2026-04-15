@@ -47,7 +47,9 @@ _STOP_WORDS = frozenset(
 )
 
 
-def summarize_retained_set(segments: list[Segment], *, max_total: int = _SUMMARY_TOTAL_LIMIT) -> str:
+def summarize_retained_set(
+    segments: list[Segment], *, max_total: int = _SUMMARY_TOTAL_LIMIT
+) -> str:
     """Build a deterministic, token-safe summary of retained segments.
 
     Each segment is truncated to _SUMMARY_SEGMENT_LIMIT chars. The overall
@@ -80,11 +82,7 @@ def _clamp(value: float) -> float:
 
 
 def _keywords(text: str) -> set[str]:
-    return {
-        token
-        for token in _TOKEN_RE.findall(text.lower())
-        if token not in _STOP_WORDS
-    }
+    return {token for token in _TOKEN_RE.findall(text.lower()) if token not in _STOP_WORDS}
 
 
 def _overlap_ratio(candidate_terms: set[str], reference_terms: set[str]) -> float:
@@ -107,10 +105,21 @@ class SequentialScorer(Scorer):
     invokes *scoring_fn(segment_content, retained_summary, task_goal)*.
     If no scoring_fn is supplied, a built-in conditional lexical backend is
     used so sequential scoring remains active in production wiring.
-    On any failure or invalid return, falls back to HeuristicScorer.
+
+    Failure handling has three layers:
+      1. Per-call failures are logged at WARNING level (not DEBUG) and fall
+         back to HeuristicScorer for the failing segments only.
+      2. A circuit breaker trips after *failure_threshold* consecutive
+         failures from the external scoring callable; while tripped, the
+         scorer uses the HeuristicScorer fallback and skips the expensive
+         LLM path entirely. It resets on the next successful call or after
+         *breaker_cooldown_seconds*, whichever comes first.
+      3. Failure counters are exposed via get_stats() so operators can
+         detect silent degradation without reading logs.
 
     Results are cached by (segment_hash, retained_set_hash, task_hash)
     so repeated scoring of the same segment in the same context is free.
+    The cache is bounded by *max_cache_entries* and uses LRU eviction.
     """
 
     _REQUIRED_KEYS = frozenset(
@@ -124,6 +133,8 @@ class SequentialScorer(Scorer):
         fallback: Scorer | None = None,
         max_cache_entries: int = 4096,
         adaptive: AdaptiveWeights | None = None,
+        failure_threshold: int = 5,
+        breaker_cooldown_seconds: float = 60.0,
     ) -> None:
         self._scoring_fn = scoring_fn
         self._task_goal = task_goal
@@ -132,18 +143,51 @@ class SequentialScorer(Scorer):
         self._cache: OrderedDict[tuple[str, str, str], dict[str, float]] = OrderedDict()
         self._adaptive = adaptive
 
-    def score_batch(
-        self, candidates: list[Segment], context: list[Segment]
-    ) -> None:
+        # Circuit breaker state
+        self._failure_threshold = max(1, failure_threshold)
+        self._breaker_cooldown_seconds = breaker_cooldown_seconds
+        self._consecutive_failures: int = 0
+        self._total_failures: int = 0
+        self._total_successes: int = 0
+        self._breaker_tripped_at: float | None = None
+
+    def score_batch(self, candidates: list[Segment], context: list[Segment]) -> None:
         """Score candidates sequentially against retained context.
 
         Sets relevance_score, staleness_score, redundancy_score, and
         composite_score on each segment in-place.
+
+        The external scoring callable is skipped entirely when the circuit
+        breaker is tripped, routing the full batch through the heuristic
+        fallback until the breaker resets.
         """
-        scoring_fn = self._scoring_fn or self._default_scoring_fn
+        # Short-circuit when no external backend is configured — no breaker needed
+        # because the lexical default can never raise.
+        if self._scoring_fn is None:
+            self._score_with_callable(candidates, context, self._default_scoring_fn)
+            return
 
+        # Breaker open: skip the LLM entirely and serve everything from fallback.
+        if self._is_breaker_open():
+            logger.info(
+                "sequential_scorer_breaker_open",
+                consecutive_failures=self._consecutive_failures,
+                total_failures=self._total_failures,
+            )
+            self._fallback.score_batch(candidates, context)
+            for seg in candidates:
+                self._apply_adaptive(seg)
+            return
+
+        self._score_with_callable(candidates, context, self._scoring_fn)
+
+    def _score_with_callable(
+        self,
+        candidates: list[Segment],
+        context: list[Segment],
+        scoring_fn: ScoringCallable,
+    ) -> None:
         task_hash = _hash(self._task_goal)
-
         failed: list[Segment] = []
 
         for seg in candidates:
@@ -158,7 +202,6 @@ class SequentialScorer(Scorer):
 
             if cache_key in self._cache:
                 scores = self._cache[cache_key]
-                # LRU touch
                 self._cache.move_to_end(cache_key)
                 self._apply_scores(seg, scores)
                 self._apply_adaptive(seg)
@@ -167,10 +210,12 @@ class SequentialScorer(Scorer):
             try:
                 result = scoring_fn(seg.content, retained_summary, self._task_goal)
                 if not self._validate_result(result):
-                    logger.debug(
+                    logger.warning(
                         "sequential_scorer_invalid_result",
                         seg_id=seg.seg_id,
+                        result_type=type(result).__name__,
                     )
+                    self._register_failure()
                     failed.append(seg)
                     continue
 
@@ -178,19 +223,78 @@ class SequentialScorer(Scorer):
                 self._cache_set(cache_key, scores)
                 self._apply_scores(seg, scores)
                 self._apply_adaptive(seg)
+                self._register_success()
 
             except Exception as e:
-                logger.debug(
+                logger.warning(
                     "sequential_scorer_error",
                     seg_id=seg.seg_id,
                     error=str(e),
                 )
+                self._register_failure()
                 failed.append(seg)
+
+            # If the breaker tripped mid-batch, stop calling the external fn
+            # and route the rest of the batch through fallback.
+            if self._is_breaker_open():
+                already_scored_ids = {s.seg_id for s in candidates[: candidates.index(seg) + 1]}
+                tail = [s for s in candidates if s.seg_id not in already_scored_ids]
+                if tail:
+                    self._fallback.score_batch(tail, context)
+                    for tail_seg in tail:
+                        self._apply_adaptive(tail_seg)
+                break
 
         if failed:
             self._fallback.score_batch(failed, context)
             for seg in failed:
                 self._apply_adaptive(seg)
+
+    def _register_failure(self) -> None:
+        import time as _time
+
+        self._consecutive_failures += 1
+        self._total_failures += 1
+        if (
+            self._consecutive_failures >= self._failure_threshold
+            and self._breaker_tripped_at is None
+        ):
+            self._breaker_tripped_at = _time.time()
+            logger.error(
+                "sequential_scorer_breaker_tripped",
+                consecutive_failures=self._consecutive_failures,
+                threshold=self._failure_threshold,
+                cooldown_seconds=self._breaker_cooldown_seconds,
+            )
+
+    def _register_success(self) -> None:
+        self._consecutive_failures = 0
+        self._total_successes += 1
+        if self._breaker_tripped_at is not None:
+            logger.info("sequential_scorer_breaker_reset_on_success")
+            self._breaker_tripped_at = None
+
+    def _is_breaker_open(self) -> bool:
+        import time as _time
+
+        if self._breaker_tripped_at is None:
+            return False
+        if _time.time() - self._breaker_tripped_at >= self._breaker_cooldown_seconds:
+            logger.info("sequential_scorer_breaker_cooldown_elapsed")
+            self._breaker_tripped_at = None
+            self._consecutive_failures = 0
+            return False
+        return True
+
+    def get_stats(self) -> dict[str, int | bool | float]:
+        """Return counters and breaker state for observability."""
+        return {
+            "consecutive_failures": self._consecutive_failures,
+            "total_failures": self._total_failures,
+            "total_successes": self._total_successes,
+            "breaker_open": self._is_breaker_open(),
+            "cache_entries": len(self._cache),
+        }
 
     def _validate_result(self, result: object) -> bool:
         """Check that result is a dict with all required score keys and valid values."""
@@ -250,11 +354,7 @@ class SequentialScorer(Scorer):
         redundancy = _overlap_ratio(seg_terms, retained_terms)
         staleness = 0.5
 
-        composite = _clamp(
-            0.6 * relevance
-            + 0.3 * (1.0 - redundancy)
-            + 0.1 * staleness
-        )
+        composite = _clamp(0.6 * relevance + 0.3 * (1.0 - redundancy) + 0.1 * staleness)
 
         return {
             "relevance_score": _clamp(relevance),

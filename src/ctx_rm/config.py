@@ -50,8 +50,8 @@ class CtxRmConfig(BaseSettings):
 
     # LlamaCpp driver settings
     llama_base_url: str = Field(
-        default="http://192.168.86.141:8080",
-        description="llama-server base URL",
+        default="http://localhost:8080",
+        description=("llama-server base URL. Override via CTX_RM_LLAMA_BASE_URL for remote hosts."),
     )
     llama_temperature: float = Field(default=0.3, description="LlamaCpp temperature")
     llama_max_tokens: int = Field(default=4096, description="LlamaCpp max completion tokens")
@@ -83,12 +83,8 @@ class CtxRmConfig(BaseSettings):
 
     # LLM Scoring (opt-in)
     scorer: str = Field(default="heuristic", description="Scorer: heuristic, ollama, or sequential")
-    ollama_host: str = Field(
-        default="http://localhost:11434", description="Ollama API host"
-    )
-    ollama_model: str | None = Field(
-        default=None, description="Preferred Ollama model (None=auto)"
-    )
+    ollama_host: str = Field(default="http://localhost:11434", description="Ollama API host")
+    ollama_model: str | None = Field(default=None, description="Preferred Ollama model (None=auto)")
     ollama_max_concurrent: int = Field(
         default=4, description="Max concurrent Ollama scoring requests"
     )

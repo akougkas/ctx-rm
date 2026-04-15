@@ -3,12 +3,27 @@
 Tools are defined in OpenAI function calling format for compatibility
 with llama-server's /v1/chat/completions API. The ToolExecutor handles
 execution with sandboxing (working directory confinement).
+
+Resource limits are enforced uniformly via module-level constants:
+
+- MAX_FILE_READ_BYTES: read() is short-circuited via stat() when the file
+  is larger than this, preventing OOM on huge artifacts.
+- MAX_OUTPUT_CHARS: tool result strings are truncated to this length.
+- DEFAULT_SHELL_TIMEOUT_SECONDS / MAX_SHELL_TIMEOUT_SECONDS: the shell
+  tool timeout is bounded so an agent cannot disable timeouts by passing
+  a huge value.
+- GREP_TIMEOUT_SECONDS: grep has its own tighter cap.
+
+Workdir confinement uses Path.resolve() (which follows symlinks) so a
+symlink pointing outside the working directory is rejected even when the
+symlink itself lives inside.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +32,31 @@ import structlog
 
 logger = structlog.get_logger()
 
+MAX_FILE_READ_BYTES = 2_000_000  # 2 MB cap before reading into memory
+MAX_OUTPUT_CHARS = 50_000
+DEFAULT_SHELL_TIMEOUT_SECONDS = 30
+MAX_SHELL_TIMEOUT_SECONDS = 120
+GREP_TIMEOUT_SECONDS = 15
+MAX_LIST_DIRECTORY_ENTRIES = 500
+
+
+def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n... [truncated, {len(text)} chars total]"
+
+
 _DEFAULT_INCLUDES = [
-    "*.py", "*.js", "*.ts", "*.yaml", "*.yml",
-    "*.json", "*.txt", "*.md", "*.toml", "*.cfg",
+    "*.py",
+    "*.js",
+    "*.ts",
+    "*.yaml",
+    "*.yml",
+    "*.json",
+    "*.txt",
+    "*.md",
+    "*.toml",
+    "*.cfg",
 ]
 
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
@@ -234,14 +271,24 @@ class ToolExecutor:
         return orjson.dumps(payload).decode()
 
     def _resolve_path(self, path_str: str) -> Path:
-        """Resolve a path relative to working_dir."""
+        """Resolve a path relative to working_dir.
+
+        Uses Path.resolve() which follows symlinks, so any downstream
+        _check_within_workdir call sees the real target on disk. Callers
+        that want to allow reads outside the workdir must opt in explicitly.
+        """
         p = Path(path_str)
         if not p.is_absolute():
             p = self.working_dir / p
         return p.resolve()
 
     def _check_within_workdir(self, resolved: Path) -> bool:
-        """Check that a path is within the working directory."""
+        """Check that a resolved path is within the working directory.
+
+        The resolved path is the real filesystem target (symlinks followed),
+        so a symlink that points outside the workdir is rejected even when
+        the link itself lives inside.
+        """
         try:
             resolved.relative_to(self.working_dir)
             return True
@@ -250,14 +297,26 @@ class ToolExecutor:
 
     async def _file_read(self, args: dict[str, Any]) -> str:
         path = self._resolve_path(args["path"])
+        if not self._check_within_workdir(path):
+            return f"Error: read denied — path outside working directory: {path}"
         if not path.exists():
             return f"Error: file not found: {path}"
         if not path.is_file():
             return f"Error: not a file: {path}"
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            return f"Error: cannot stat {path}: {exc}"
+        if size > MAX_FILE_READ_BYTES:
+            return (
+                f"Error: file too large to read: {path} "
+                f"({size} bytes > {MAX_FILE_READ_BYTES} byte cap). "
+                "Use run_shell with head/tail or grep_search for slices."
+            )
         content = path.read_text(errors="replace")
         # Truncate very large files
-        if len(content) > 50_000:
-            content = content[:50_000] + f"\n\n... [truncated, {len(content)} chars total]"
+        if len(content) > MAX_OUTPUT_CHARS:
+            content = _truncate(content)
 
         start_line = args.get("start_line")
         end_line = args.get("end_line")
@@ -313,16 +372,24 @@ class ToolExecutor:
 
         patched = content.replace(old_text, new_text, 1)
         path.write_text(patched)
-        return f"Patched {path.name}: replaced 1 occurrence ({len(old_text)} → {len(new_text)} chars)"
+        return (
+            f"Patched {path.name}: replaced 1 occurrence ({len(old_text)} → {len(new_text)} chars)"
+        )
 
     async def _run_shell(self, args: dict[str, Any]) -> str:
         command = args["command"]
-        timeout = int(args.get("timeout", 30))
+        requested_timeout = int(args.get("timeout", DEFAULT_SHELL_TIMEOUT_SECONDS))
+        # Bound the timeout so an agent cannot request an unbounded wait.
+        timeout = max(1, min(MAX_SHELL_TIMEOUT_SECONDS, requested_timeout))
 
-        # Resolve cwd: use override if provided, else working_dir
+        # Resolve cwd: use override if provided, else working_dir. The override
+        # is still confined to the workdir so shell commands cannot climb out
+        # of the sandbox via a crafted cwd argument.
         cwd_str = args.get("cwd")
         if cwd_str:
             cwd = Path(cwd_str).resolve()
+            if not self._check_within_workdir(cwd):
+                return f"Error: cwd denied — outside working directory: {cwd}"
         else:
             cwd = self.working_dir
 
@@ -334,11 +401,11 @@ class ToolExecutor:
                 cwd=str(cwd),
                 env={**os.environ, "PATH": os.environ.get("PATH", "")},
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except TimeoutError:
             proc.kill()
+            with suppress(Exception):
+                await proc.wait()
             return f"Error: command timed out after {timeout}s"
 
         result = stdout.decode(errors="replace")
@@ -348,30 +415,33 @@ class ToolExecutor:
                 result += f"\nSTDERR:\n{err}"
         # Always include exit_code for consistent parsing
         result += f"\n[exit_code: {proc.returncode}]"
-        # Truncate long output
-        if len(result) > 20_000:
-            result = result[:20_000] + f"\n... [truncated, {len(result)} chars total]"
-        return result
+        return _truncate(result)
 
     async def _list_directory(self, args: dict[str, Any]) -> str:
         path = self._resolve_path(args["path"])
+        if not self._check_within_workdir(path):
+            return f"Error: listing denied — path outside working directory: {path}"
         if not path.exists():
             return f"Error: directory not found: {path}"
         if not path.is_dir():
             return f"Error: not a directory: {path}"
         entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name))
-        lines = []
-        for entry in entries[:200]:
+        lines: list[str] = []
+        for entry in entries[:MAX_LIST_DIRECTORY_ENTRIES]:
             prefix = "d " if entry.is_dir() else "f "
             lines.append(f"{prefix}{entry.name}")
         result = "\n".join(lines)
-        if len(entries) > 200:
-            result += f"\n... [{len(entries)} entries total, showing first 200]"
+        if len(entries) > MAX_LIST_DIRECTORY_ENTRIES:
+            result += (
+                f"\n... [{len(entries)} entries total, showing first {MAX_LIST_DIRECTORY_ENTRIES}]"
+            )
         return result
 
     async def _grep_search(self, args: dict[str, Any]) -> str:
         pattern = args["pattern"]
         path = self._resolve_path(args["path"])
+        if not self._check_within_workdir(path):
+            return f"Error: grep denied — path outside working directory: {path}"
         if not path.exists():
             return f"Error: path not found: {path}"
 
@@ -399,9 +469,12 @@ class ToolExecutor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=GREP_TIMEOUT_SECONDS)
         except TimeoutError:
-            return "Error: grep search timed out"
+            with suppress(Exception):
+                proc.kill()
+                await proc.wait()
+            return f"Error: grep search timed out after {GREP_TIMEOUT_SECONDS}s"
 
         result = stdout.decode(errors="replace")
         if not result:
@@ -428,6 +501,4 @@ class ToolExecutor:
                     break
             result = "\n".join(kept)
 
-        if len(result) > 20_000:
-            result = result[:20_000] + "\n... [truncated]"
-        return result
+        return _truncate(result)

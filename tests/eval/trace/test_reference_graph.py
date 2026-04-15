@@ -1,0 +1,226 @@
+"""Tests for the reference graph.
+
+Each test builds a tiny hand-crafted Trace with known reference relationships,
+then checks that the graph recovers them under the expected mode.
+"""
+
+from __future__ import annotations
+
+from ctx_rm.eval.trace.reference_graph import (
+    ReferenceEdgeKind,
+    ReferenceGraph,
+    ReferenceMode,
+)
+from ctx_rm.eval.trace.schema import Trace, TraceSegment, TraceSegmentKind
+
+
+def _seg(
+    seg_id: str,
+    turn: int,
+    event: int,
+    kind: TraceSegmentKind,
+    content: str,
+    *,
+    tool_name: str | None = None,
+    tool_use_id: str | None = None,
+    source_file: str | None = None,
+) -> TraceSegment:
+    return TraceSegment(
+        seg_id=seg_id,
+        turn_index=turn,
+        event_index=event,
+        timestamp=float(event),
+        kind=kind,
+        content=content,
+        token_count=max(1, len(content) // 4),
+        tool_name=tool_name,
+        tool_use_id=tool_use_id,
+        source_file=source_file,
+    )
+
+
+def _trace(segs: list[TraceSegment]) -> Trace:
+    return Trace(trace_id="test", source_path="mem", project="test", segments=segs)
+
+
+class TestFileRereadEdge:
+    def test_later_tool_use_on_same_file_creates_edge(self) -> None:
+        segs = [
+            _seg(
+                "tu1",
+                0,
+                0,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Read file_path=/a.py",
+                tool_name="Read",
+                tool_use_id="id1",
+                source_file="/a.py",
+            ),
+            _seg(
+                "tr1",
+                1,
+                1,
+                TraceSegmentKind.TOOL_RESULT,
+                "contents of a",
+                tool_use_id="id1",
+            ),
+            # A lot of intervening noise
+            _seg(
+                "noise",
+                2,
+                2,
+                TraceSegmentKind.ASSISTANT_TEXT,
+                "working on it",
+            ),
+            _seg(
+                "tu2",
+                3,
+                3,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Read file_path=/a.py",
+                tool_name="Read",
+                tool_use_id="id2",
+                source_file="/a.py",
+            ),
+        ]
+        graph = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        kinds = {e.kind for e in graph.edges}
+        assert ReferenceEdgeKind.FILE_REREAD in kinds
+        # Both the earlier tool_use and its tool_result should be referenced.
+        assert graph.is_referenced_after("tu1", turn=2)
+        assert graph.is_referenced_after("tr1", turn=2)
+        assert not graph.is_referenced_after("noise", turn=2)
+
+    def test_no_edge_when_paths_differ(self) -> None:
+        segs = [
+            _seg(
+                "tu1",
+                0,
+                0,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Read file_path=/a.py",
+                tool_name="Read",
+                source_file="/a.py",
+            ),
+            _seg(
+                "tu2",
+                1,
+                1,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Read file_path=/b.py",
+                tool_name="Read",
+                source_file="/b.py",
+            ),
+        ]
+        graph = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        assert graph.num_edges == 0
+
+
+class TestExactQuoteEdge:
+    def test_later_text_quoting_tool_result(self) -> None:
+        result_text = (
+            "The function authenticate_user_with_token returns a JWT bearer "
+            "after validating the signature against the public key"
+        )
+        segs = [
+            _seg(
+                "tr1",
+                0,
+                0,
+                TraceSegmentKind.TOOL_RESULT,
+                result_text,
+                tool_use_id="id1",
+            ),
+            _seg(
+                "at1",
+                1,
+                1,
+                TraceSegmentKind.ASSISTANT_TEXT,
+                "Looking at authenticate_user_with_token, it returns a JWT "
+                "bearer after validating the signature.",
+            ),
+        ]
+        graph = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        kinds = {e.kind for e in graph.edges}
+        assert ReferenceEdgeKind.EXACT_QUOTE in kinds
+        assert graph.is_referenced_after("tr1", turn=0)
+
+    def test_unrelated_text_does_not_match(self) -> None:
+        segs = [
+            _seg(
+                "tr1",
+                0,
+                0,
+                TraceSegmentKind.TOOL_RESULT,
+                "result alpha bravo charlie delta echo foxtrot golf hotel",
+                tool_use_id="id1",
+            ),
+            _seg(
+                "at1",
+                1,
+                1,
+                TraceSegmentKind.ASSISTANT_TEXT,
+                "entirely different topic about kubernetes networking stanzas",
+            ),
+        ]
+        graph = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        assert ReferenceEdgeKind.EXACT_QUOTE not in {e.kind for e in graph.edges}
+
+
+class TestLenientNgramEdge:
+    def test_shared_ngram_creates_lenient_edge(self) -> None:
+        shared = "async function dispatches worker threads across multiple queues"
+        segs = [
+            _seg(
+                "a",
+                0,
+                0,
+                TraceSegmentKind.ASSISTANT_TEXT,
+                f"The {shared} using a central coordinator",
+            ),
+            _seg(
+                "b",
+                1,
+                1,
+                TraceSegmentKind.ASSISTANT_TEXT,
+                f"We implement the {shared} inside the handler",
+            ),
+        ]
+        strict = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        lenient = ReferenceGraph.build(_trace(segs), ReferenceMode.LENIENT)
+        # Strict may or may not catch this; lenient definitely should.
+        assert lenient.num_edges >= strict.num_edges
+        assert ReferenceEdgeKind.NGRAM_OVERLAP in {e.kind for e in lenient.edges}
+
+    def test_lenient_has_more_edges_than_strict_on_real_content(self) -> None:
+        content_a = (
+            "The ContextBus admission control routes large file_read tool "
+            "segments to the Warm tier to prevent scan pollution in active."
+        )
+        content_b = (
+            "To prevent scan pollution in active context, ContextBus admission "
+            "control sends large file_read tool segments straight to Warm."
+        )
+        segs = [
+            _seg("a", 0, 0, TraceSegmentKind.ASSISTANT_TEXT, content_a),
+            _seg("b", 1, 1, TraceSegmentKind.ASSISTANT_TEXT, content_b),
+        ]
+        strict = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        lenient = ReferenceGraph.build(_trace(segs), ReferenceMode.LENIENT)
+        assert lenient.num_edges >= strict.num_edges
+
+
+class TestSelfReferenceExcluded:
+    def test_no_self_edge(self) -> None:
+        segs = [
+            _seg(
+                "x",
+                0,
+                0,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Read file_path=/a.py",
+                source_file="/a.py",
+            ),
+        ]
+        graph = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        assert graph.num_edges == 0

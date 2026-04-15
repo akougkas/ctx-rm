@@ -21,6 +21,8 @@ import json
 import sqlite3
 import time
 from collections import OrderedDict, deque
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import numpy as np
@@ -30,6 +32,15 @@ from ctx_rm.core.embedding import EmbeddingProvider, cosine_similarity_batch
 from ctx_rm.core.segment import Segment, Tier
 
 logger = structlog.get_logger()
+
+
+class StoreWriteError(RuntimeError):
+    """Raised when a ColdStore write fails and the transaction was rolled back.
+
+    Callers (ContextBus, TieredStore) should treat this as a durable-storage
+    failure — the segment was not persisted and audit state is consistent
+    with the last successful commit.
+    """
 
 
 class WarmCache:
@@ -53,9 +64,7 @@ class WarmCache:
         self._total_tokens += seg.token_count
 
         aged_out: list[Segment] = []
-        while (
-            len(self._store) > self.max_items or self._total_tokens > self.max_tokens
-        ):
+        while len(self._store) > self.max_items or self._total_tokens > self.max_tokens:
             _, evicted = self._store.popitem(last=False)
             self._total_tokens -= evicted.token_count
             aged_out.append(evicted)
@@ -102,57 +111,98 @@ class ColdStore:
         self._embedding_provider = embedding_provider
         self._conn = sqlite3.connect(self._db_path)
         self._conn.row_factory = sqlite3.Row
+        # WAL mode gives safer concurrent readers + faster durable commits on
+        # file-backed stores. It is a no-op for :memory: (ignored by SQLite).
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.DatabaseError:
+            pass
+        self._embedding_dim_warned: bool = False
         self._init_schema()
 
+    @contextmanager
+    def _transaction(self, op: str, **ctx: object) -> Iterator[sqlite3.Connection]:
+        """Execute a write inside an explicit transaction with rollback on failure.
+
+        On any sqlite3 error the transaction is rolled back and a StoreWriteError
+        is raised so callers can decide how to handle the loss. Successful paths
+        commit exactly once.
+        """
+        try:
+            yield self._conn
+        except sqlite3.Error as exc:
+            try:
+                self._conn.rollback()
+            except sqlite3.Error:
+                logger.exception("coldstore_rollback_failed", op=op, **ctx)
+            logger.error("coldstore_write_failed", op=op, error=str(exc), **ctx)
+            raise StoreWriteError(f"cold store {op} failed: {exc}") from exc
+        else:
+            try:
+                self._conn.commit()
+            except sqlite3.Error as exc:
+                with suppress(sqlite3.Error):
+                    self._conn.rollback()
+                logger.error("coldstore_commit_failed", op=op, error=str(exc), **ctx)
+                raise StoreWriteError(f"cold store {op} commit failed: {exc}") from exc
+
     def _init_schema(self) -> None:
-        self._conn.executescript("""
-            CREATE TABLE IF NOT EXISTS segments (
-                seg_id TEXT PRIMARY KEY,
-                content TEXT NOT NULL,
-                role TEXT NOT NULL,
-                token_count INTEGER NOT NULL,
-                created_at REAL NOT NULL,
-                evicted_at REAL,
-                last_accessed REAL,
-                access_count INTEGER DEFAULT 0,
-                relevance_score REAL,
-                eviction_reason TEXT,
-                eviction_policy TEXT,
-                source TEXT,
-                turn_number INTEGER,
-                summary TEXT,
-                metadata_json TEXT,
-                tier TEXT DEFAULT 'cold',
-                archived INTEGER DEFAULT 0
-            );
+        with self._transaction("init_schema"):
+            self._conn.executescript("""
+                CREATE TABLE IF NOT EXISTS segments (
+                    seg_id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    token_count INTEGER NOT NULL,
+                    created_at REAL NOT NULL,
+                    evicted_at REAL,
+                    last_accessed REAL,
+                    access_count INTEGER DEFAULT 0,
+                    relevance_score REAL,
+                    eviction_reason TEXT,
+                    eviction_policy TEXT,
+                    source TEXT,
+                    turn_number INTEGER,
+                    summary TEXT,
+                    metadata_json TEXT,
+                    tier TEXT DEFAULT 'cold',
+                    archived INTEGER DEFAULT 0
+                );
 
-            CREATE INDEX IF NOT EXISTS idx_seg_turn ON segments(turn_number);
-            CREATE INDEX IF NOT EXISTS idx_seg_source ON segments(source);
-            CREATE INDEX IF NOT EXISTS idx_seg_tier ON segments(tier);
+                CREATE INDEX IF NOT EXISTS idx_seg_turn ON segments(turn_number);
+                CREATE INDEX IF NOT EXISTS idx_seg_source ON segments(source);
+                CREATE INDEX IF NOT EXISTS idx_seg_tier ON segments(tier);
 
-            -- Audit log: every eviction event
-            CREATE TABLE IF NOT EXISTS eviction_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                seg_id TEXT NOT NULL,
-                from_tier TEXT NOT NULL,
-                to_tier TEXT NOT NULL,
-                reason TEXT,
-                policy TEXT,
-                timestamp REAL NOT NULL
-            );
-        """)
-        self._conn.commit()
+                -- Audit log: every eviction event
+                CREATE TABLE IF NOT EXISTS eviction_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    seg_id TEXT NOT NULL,
+                    from_tier TEXT NOT NULL,
+                    to_tier TEXT NOT NULL,
+                    reason TEXT,
+                    policy TEXT,
+                    timestamp REAL NOT NULL
+                );
+            """)
 
-        # Embedding columns (idempotent migration)
-        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(segments)").fetchall()}
-        if "embedding" not in columns:
-            self._conn.execute("ALTER TABLE segments ADD COLUMN embedding BLOB")
-        if "embedding_provider" not in columns:
-            self._conn.execute("ALTER TABLE segments ADD COLUMN embedding_provider TEXT")
-        self._conn.commit()
+            # Embedding columns (idempotent migration)
+            columns = {
+                row[1] for row in self._conn.execute("PRAGMA table_info(segments)").fetchall()
+            }
+            if "embedding" not in columns:
+                self._conn.execute("ALTER TABLE segments ADD COLUMN embedding BLOB")
+            if "embedding_provider" not in columns:
+                self._conn.execute("ALTER TABLE segments ADD COLUMN embedding_provider TEXT")
 
     def persist(self, seg: Segment) -> None:
-        """Write a segment to cold storage, computing embedding if provider set."""
+        """Write a segment to cold storage, computing embedding if provider set.
+
+        Raises:
+            StoreWriteError: if the SQLite write fails. Callers should treat
+                this as a durable-storage failure and avoid removing the segment
+                from the caller-owned tier.
+        """
         seg.tier = Tier.COLD
 
         embedding_blob = None
@@ -163,35 +213,35 @@ class ColdStore:
                 embedding_blob = vec.astype(np.float32).tobytes()
                 provider_name = self._embedding_provider.name
 
-        self._conn.execute(
-            """INSERT OR REPLACE INTO segments
-               (seg_id, content, role, token_count, created_at, evicted_at,
-                last_accessed, access_count, relevance_score, eviction_reason,
-                eviction_policy, source, turn_number, summary, metadata_json,
-                tier, embedding, embedding_provider)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                seg.seg_id,
-                seg.content,
-                seg.role.value,
-                seg.token_count,
-                seg.created_at,
-                seg.evicted_at,
-                seg.last_accessed,
-                seg.access_count,
-                seg.relevance_score,
-                seg.eviction_reason,
-                seg.eviction_policy,
-                seg.source,
-                seg.turn_number,
-                seg.summary,
-                json.dumps(seg.metadata) if seg.metadata else None,
-                Tier.COLD.value,
-                embedding_blob,
-                provider_name,
-            ),
-        )
-        self._conn.commit()
+        with self._transaction("persist", seg_id=seg.seg_id):
+            self._conn.execute(
+                """INSERT OR REPLACE INTO segments
+                   (seg_id, content, role, token_count, created_at, evicted_at,
+                    last_accessed, access_count, relevance_score, eviction_reason,
+                    eviction_policy, source, turn_number, summary, metadata_json,
+                    tier, embedding, embedding_provider)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    seg.seg_id,
+                    seg.content,
+                    seg.role.value,
+                    seg.token_count,
+                    seg.created_at,
+                    seg.evicted_at,
+                    seg.last_accessed,
+                    seg.access_count,
+                    seg.relevance_score,
+                    seg.eviction_reason,
+                    seg.eviction_policy,
+                    seg.source,
+                    seg.turn_number,
+                    seg.summary,
+                    json.dumps(seg.metadata) if seg.metadata else None,
+                    Tier.COLD.value,
+                    embedding_blob,
+                    provider_name,
+                ),
+            )
 
     def retrieve(self, seg_id: str) -> Segment | None:
         """Retrieve a specific segment by ID."""
@@ -219,9 +269,7 @@ class ColdStore:
         ).fetchall()
         return [self._row_to_segment(r) for r in rows]
 
-    def _search_by_embedding(
-        self, query: str, top_k: int, threshold: float
-    ) -> list[Segment]:
+    def _search_by_embedding(self, query: str, top_k: int, threshold: float) -> list[Segment]:
         """Cosine similarity search using embedding provider."""
         query_vec = self._embedding_provider.embed(query)  # type: ignore[union-attr]
         if np.linalg.norm(query_vec) == 0:
@@ -238,12 +286,28 @@ class ColdStore:
         expected_dim = self._embedding_provider.dimensions  # type: ignore[union-attr]
         seg_ids: list[str] = []
         embeddings: list[np.ndarray] = []
+        dim_mismatch_count = 0
         for row in rows:
             vec = np.frombuffer(row["embedding"], dtype=np.float32)
             if vec.shape[0] != expected_dim:
+                dim_mismatch_count += 1
                 continue  # dimension mismatch — skip (provider changed or pre-migration)
             seg_ids.append(row["seg_id"])
             embeddings.append(vec)
+
+        if dim_mismatch_count and not self._embedding_dim_warned:
+            logger.warning(
+                "coldstore_embedding_dim_mismatch",
+                expected_dim=expected_dim,
+                skipped=dim_mismatch_count,
+                total=len(rows),
+                provider=self._embedding_provider.name,  # type: ignore[union-attr]
+                hint=(
+                    "embedding provider changed mid-session; rebuild the cold "
+                    "store or re-embed existing rows to restore recall quality"
+                ),
+            )
+            self._embedding_dim_warned = True
 
         if not embeddings:
             return self._search_by_keyword(query, top_k)
@@ -252,9 +316,7 @@ class ColdStore:
         similarities = cosine_similarity_batch(query_vec, stored_matrix)
 
         # Sort by similarity descending, filter by threshold, take top_k
-        ranked = sorted(
-            zip(seg_ids, similarities, strict=True), key=lambda x: x[1], reverse=True
-        )
+        ranked = sorted(zip(seg_ids, similarities, strict=True), key=lambda x: x[1], reverse=True)
         results: list[Segment] = []
         for sid, sim in ranked:
             if sim < threshold:
@@ -268,44 +330,61 @@ class ColdStore:
         return results
 
     def archive(self, seg_id: str) -> None:
-        """Move a segment to graveyard (mark as archived)."""
-        self._conn.execute(
-            "UPDATE segments SET archived = 1, tier = ? WHERE seg_id = ?",
-            (Tier.GRAVEYARD.value, seg_id),
-        )
-        self._conn.commit()
+        """Move a segment to graveyard (mark as archived).
+
+        Raises StoreWriteError on commit failure.
+        """
+        with self._transaction("archive", seg_id=seg_id):
+            self._conn.execute(
+                "UPDATE segments SET archived = 1, tier = ? WHERE seg_id = ?",
+                (Tier.GRAVEYARD.value, seg_id),
+            )
 
     def remove(self, seg_id: str) -> Segment | None:
-        """Remove from cold (for recall to active)."""
+        """Remove from cold (for recall to active).
+
+        If the retrieval succeeds but the DELETE fails, the transaction rolls
+        back and StoreWriteError is raised so the caller does not promote a
+        segment that still lives on disk.
+        """
         seg = self.retrieve(seg_id)
-        if seg:
+        if seg is None:
+            return None
+        with self._transaction("remove", seg_id=seg_id):
             self._conn.execute("DELETE FROM segments WHERE seg_id = ?", (seg_id,))
-            self._conn.commit()
         return seg
 
     def log_transition(
         self, seg_id: str, from_tier: str, to_tier: str, reason: str | None, policy: str | None
     ) -> None:
-        """Record a tier transition in the audit log."""
-        self._conn.execute(
-            """INSERT INTO eviction_log (seg_id, from_tier, to_tier, reason, policy, timestamp)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (seg_id, from_tier, to_tier, reason, policy, time.time()),
-        )
-        self._conn.commit()
+        """Record a tier transition in the audit log.
+
+        Audit writes are best-effort: a commit failure logs the error but does
+        not raise, because the parent tier transition may already have
+        succeeded and losing a log line is preferable to crashing eviction.
+        """
+        try:
+            with self._transaction(
+                "log_transition", seg_id=seg_id, from_tier=from_tier, to_tier=to_tier
+            ):
+                self._conn.execute(
+                    """INSERT INTO eviction_log
+                       (seg_id, from_tier, to_tier, reason, policy, timestamp)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (seg_id, from_tier, to_tier, reason, policy, time.time()),
+                )
+        except StoreWriteError:
+            # Audit-only: swallow so eviction proceeds. Error is already logged.
+            pass
 
     @property
     def count(self) -> int:
-        row = self._conn.execute(
-            "SELECT COUNT(*) FROM segments WHERE archived = 0"
-        ).fetchone()
+        row = self._conn.execute("SELECT COUNT(*) FROM segments WHERE archived = 0").fetchone()
         return row[0] if row else 0
 
     @property
     def archived_count(self) -> int:
-        row = self._conn.execute(
-            "SELECT COUNT(*) FROM segments WHERE archived = 1"
-        ).fetchone()
+        row = self._conn.execute("SELECT COUNT(*) FROM segments WHERE archived = 1").fetchone()
         return row[0] if row else 0
 
     def _row_to_segment(self, row: sqlite3.Row) -> Segment:
@@ -347,12 +426,23 @@ class ZombieQueue:
         self._index: dict[str, Segment] = {}
 
     def stage(self, seg: Segment) -> Segment | None:
-        """Stage a segment for recall. Returns oldest if queue overflows."""
+        """Stage a segment for recall. Returns oldest if queue overflows.
+
+        Overflow is logged at WARNING level so operators can see when the
+        recall staging area is thrashing (typical cause: recall fan-out
+        exceeds max_items under hot reload).
+        """
         seg.tier = Tier.ZOMBIE
         overflow = None
         if len(self._queue) >= self.max_items:
             overflow = self._queue.popleft()
             self._index.pop(overflow.seg_id, None)
+            logger.warning(
+                "zombie_queue_overflow",
+                max_items=self.max_items,
+                dropped_seg_id=overflow.seg_id,
+                dropped_source=overflow.source,
+            )
         self._queue.append(seg)
         self._index[seg.seg_id] = seg
         return overflow
@@ -389,7 +479,13 @@ class TieredStore:
         self.cold_archive_age = cold_archive_age
 
     def demote_to_warm(self, seg: Segment) -> None:
-        """First stop after eviction from Active."""
+        """Move a segment from Active into the Warm tier.
+
+        Warm insertion is in-memory and always succeeds. If Warm overflows,
+        the oldest segments cascade into Cold. A cold-write failure logs and
+        re-raises StoreWriteError so callers can surface the durability loss
+        without losing the segments currently sitting in Warm.
+        """
         old_tier = seg.tier.value
         aged_out = self.warm.put(seg)
 
@@ -405,7 +501,9 @@ class TieredStore:
         """Attempt to recall a segment from any tier.
 
         Search order: Warm (fast) → Zombie (staged) → Cold (disk) → Graveyard.
-        Recalled segments pass through Zombie staging.
+        Cold recalls pass through Zombie staging so validation can reject
+        noisy page faults before they reach Active. Returns None on a miss
+        across every tier.
         """
         # Try warm first (fast path — like ARC ghost hit)
         seg = self.warm.remove(seg_id)
@@ -444,9 +542,7 @@ class TieredStore:
         Results are merged and deduplicated, warm matches ranked by overlap.
         """
         # Extract meaningful query words (3+ chars to skip noise)
-        query_words = {
-            w for w in query.lower().split() if len(w) >= 3
-        }
+        query_words = {w for w in query.lower().split() if len(w) >= 3}
 
         results: list[Segment] = []
         seen: set[str] = set()
@@ -488,7 +584,23 @@ class TieredStore:
     # ── Internal ────────────────────────────────────────────────────────
 
     def _demote_to_cold(self, seg: Segment) -> None:
-        """Move a segment from warm to cold (persistent store)."""
+        """Move a segment from warm to cold (persistent store).
+
+        If the cold write fails, the segment is re-queued at the head of Warm
+        so it survives until the next eviction cycle. This trades a bit of
+        memory pressure for durability across transient SQLite errors.
+        """
         old_tier = seg.tier.value
-        self.cold.persist(seg)
+        try:
+            self.cold.persist(seg)
+        except StoreWriteError:
+            # Re-insert so the segment stays available; overflow handling
+            # will retry on the next eviction.
+            logger.warning(
+                "cold_persist_retry_via_warm",
+                seg_id=seg.seg_id,
+                source=seg.source,
+            )
+            self.warm.put(seg)
+            raise
         self.cold.log_transition(seg.seg_id, old_tier, Tier.COLD.value, "warm_age_out", None)

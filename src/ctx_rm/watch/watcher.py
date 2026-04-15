@@ -24,10 +24,10 @@ logger = structlog.get_logger()
 class TriggerMode(StrEnum):
     """When the watcher should trigger eviction."""
 
-    INTERVAL = "interval"       # Fixed time interval
-    THRESHOLD = "threshold"     # When token usage exceeds threshold
-    TURN = "turn"               # After every N turns
-    HYBRID = "hybrid"           # Combination of all above
+    INTERVAL = "interval"  # Fixed time interval
+    THRESHOLD = "threshold"  # When token usage exceeds threshold
+    TURN = "turn"  # After every N turns
+    HYBRID = "hybrid"  # Combination of all above
 
 
 class WatcherConfig:
@@ -37,15 +37,17 @@ class WatcherConfig:
         self,
         mode: TriggerMode = TriggerMode.HYBRID,
         interval_seconds: float = 5.0,
-        threshold_ratio: float = 0.70,   # Trigger at 70% utilization
-        turns_interval: int = 3,         # Every 3 turns
-        min_tokens_to_evict: int = 1000, # Don't bother for tiny amounts
+        threshold_ratio: float = 0.70,  # Trigger at 70% utilization
+        turns_interval: int = 3,  # Every 3 turns
+        min_tokens_to_evict: int = 1000,  # Don't bother for tiny amounts
+        max_consecutive_failures: int = 5,
     ) -> None:
         self.mode = mode
         self.interval_seconds = interval_seconds
         self.threshold_ratio = threshold_ratio
         self.turns_interval = turns_interval
         self.min_tokens_to_evict = min_tokens_to_evict
+        self.max_consecutive_failures = max_consecutive_failures
 
 
 class Watcher:
@@ -65,13 +67,23 @@ class Watcher:
         self._stop_event = asyncio.Event()
         self._last_turn: int = 0
         self._cycles_run: int = 0
+        self._consecutive_failures: int = 0
+        self._total_failures: int = 0
+        self._aborted: bool = False
 
     async def run(self) -> None:
-        """Main watcher loop — runs until stop() is called."""
+        """Main watcher loop — runs until stop() is called.
+
+        Failures are logged at ERROR level and counted. After
+        `config.max_consecutive_failures` failures the watcher aborts so a
+        broken background loop cannot silently coexist with a live agent.
+        Call `get_stats()` to observe failure counters.
+        """
         logger.info(
             "watcher_started",
             mode=self.config.mode.value,
             interval=self.config.interval_seconds,
+            max_consecutive_failures=self.config.max_consecutive_failures,
         )
 
         while not self._stop_event.is_set():
@@ -87,6 +99,7 @@ class Watcher:
                             tokens_freed=sum(s.token_count for s in evicted),
                         )
                     self._last_turn = self.bus.turn_number
+                    self._consecutive_failures = 0
 
                 try:
                     await asyncio.wait_for(
@@ -98,7 +111,21 @@ class Watcher:
             except asyncio.CancelledError:
                 break
             except Exception:
-                logger.exception("watcher_error")
+                self._consecutive_failures += 1
+                self._total_failures += 1
+                logger.exception(
+                    "watcher_error",
+                    consecutive_failures=self._consecutive_failures,
+                    total_failures=self._total_failures,
+                )
+                if self._consecutive_failures >= self.config.max_consecutive_failures:
+                    self._aborted = True
+                    logger.error(
+                        "watcher_aborted_after_failures",
+                        consecutive_failures=self._consecutive_failures,
+                        total_failures=self._total_failures,
+                    )
+                    break
                 try:
                     await asyncio.wait_for(
                         self._stop_event.wait(),
@@ -107,7 +134,12 @@ class Watcher:
                 except TimeoutError:
                     pass
 
-        logger.info("watcher_stopped", total_cycles=self._cycles_run)
+        logger.info(
+            "watcher_stopped",
+            total_cycles=self._cycles_run,
+            aborted=self._aborted,
+            total_failures=self._total_failures,
+        )
 
     def stop(self) -> None:
         """Signal the watcher to stop."""
@@ -141,8 +173,11 @@ class Watcher:
 
     def get_stats(self) -> dict[str, Any]:
         return {
-            "running": not self._stop_event.is_set(),
+            "running": not self._stop_event.is_set() and not self._aborted,
+            "aborted": self._aborted,
             "cycles_run": self._cycles_run,
+            "consecutive_failures": self._consecutive_failures,
+            "total_failures": self._total_failures,
             "mode": self.config.mode.value,
             "last_turn_checked": self._last_turn,
         }

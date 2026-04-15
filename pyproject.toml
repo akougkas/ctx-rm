@@ -31,11 +31,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-bench = [
-    "matplotlib>=3.10",
-    "pandas>=2.2",
-    "tabulate>=0.9",
-]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.25",
@@ -43,6 +38,11 @@ dev = [
     "pre-commit>=4.0",
     "ruff>=0.9",
     "mypy>=1.14",
+]
+eval = [
+    "matplotlib>=3.10",
+    "pandas>=2.2",
+    "tabulate>=0.9",
 ]
 embeddings = [
     "sentence-transformers>=5.0",
@@ -53,7 +53,7 @@ ollama = [
 tokenizer = [
     "tiktoken>=0.8",
 ]
-all = ["ctx-rm[bench,dev,embeddings,ollama,tokenizer]"]
+all = ["ctx-rm[dev,eval,embeddings,ollama,tokenizer]"]
 
 [project.scripts]
 ctx-rm = "ctx_rm.cli.main:app"
@@ -73,12 +73,18 @@ src = ["src"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
 
+# B008 is Typer's idiom for CLI option defaults; suppressing in CLI entry
+# points keeps the signatures readable without replacing every default with
+# a module-level singleton.
+[tool.ruff.lint.per-file-ignores]
+"src/ctx_rm/eval/cli.py" = ["B008"]
+"src/ctx_rm/cli/main.py" = ["B008"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "integration: requires real llama-server on mini:8080",
-    "live: requires real llama-server for live TUI testing",
 ]
 
 [tool.mypy]
