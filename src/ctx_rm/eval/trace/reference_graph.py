@@ -48,12 +48,21 @@ from collections import defaultdict
 from dataclasses import dataclass
 from enum import StrEnum
 
+from ctx_rm.eval.trace._path_tokens import strip_path_segments
 from ctx_rm.eval.trace.schema import Trace, TraceSegment, TraceSegmentKind
 
 # Tunables. Centralized so the paper can report the exact values used.
 MIN_EXACT_QUOTE_CHARS = 20
 NGRAM_SIZE = 5
 MIN_DISTINCTIVE_TOKEN_LEN = 3
+
+# Tools whose output is a listing, not quotable content.
+_LISTING_TOOLS = frozenset({"Glob", "Grep", "LS", "NotebookRead"})
+# Bash commands whose output is a directory listing / file search / error template.
+_LISTING_BASH_COMMANDS = frozenset(
+    {"ls", "find", "tree", "wc", "stat", "du", "grep", "fd", "rg"}
+)
+_MIN_STRIPPED_CONTENT_CHARS = 40
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
 _STOPWORDS = frozenset(
@@ -177,10 +186,71 @@ class ReferenceGraph:
         return graph
 
     def _populate(self) -> None:
+        self._tool_use_by_id: dict[str, TraceSegment] = {
+            s.tool_use_id: s
+            for s in self.trace.segments
+            if s.kind == TraceSegmentKind.TOOL_USE and s.tool_use_id
+        }
+        self._ambient_tokens: set[str] = set()  # populated by Task 5
         self._rule_file_reread()
         self._rule_exact_quote()
         if self.mode == ReferenceMode.LENIENT:
             self._rule_ngram_overlap()
+
+    def _originating_tool(self, seg: TraceSegment) -> tuple[str | None, str | None]:
+        """Resolve the tool_use that produced this tool_result.
+
+        Returns:
+            A pair ``(tool_name, bash_leading_command)``. ``bash_leading_command``
+            is the first whitespace-delimited token of the ``command=`` line in
+            the stringified Bash tool_use input, lowercased. Both fields are
+            ``None`` when no originating tool_use is indexed.
+        """
+        if seg.kind != TraceSegmentKind.TOOL_RESULT or not seg.tool_use_id:
+            return (None, None)
+        tu = self._tool_use_by_id.get(seg.tool_use_id)
+        if tu is None:
+            return (None, None)
+        name = tu.tool_name
+        bash_cmd: str | None = None
+        if name == "Bash":
+            body = tu.content or ""
+            for line in body.splitlines():
+                if line.startswith("command="):
+                    tokens = line[len("command=") :].strip().split()
+                    if tokens:
+                        bash_cmd = tokens[0].lower()
+                    break
+        return (name, bash_cmd)
+
+    def _is_quote_source(self, seg: TraceSegment) -> bool:
+        """Return True iff ``seg`` may act as an exact-quote source.
+
+        A tool_result is a valid quote source iff its origin is not a
+        listing tool and its stripped body has at least
+        ``_MIN_STRIPPED_CONTENT_CHARS`` non-whitespace characters.
+        """
+        if seg.kind != TraceSegmentKind.TOOL_RESULT:
+            return False
+        name, bash_cmd = self._originating_tool(seg)
+        if name in _LISTING_TOOLS:
+            return False
+        if name == "Bash" and bash_cmd in _LISTING_BASH_COMMANDS:
+            return False
+        stripped = strip_path_segments(seg.content or "")
+        return len(stripped.strip()) >= _MIN_STRIPPED_CONTENT_CHARS
+
+    def _is_quote_target(self, seg: TraceSegment) -> bool:
+        """Return True iff ``seg`` may receive an exact-quote edge.
+
+        A target is valid iff its kind is ``TOOL_USE`` or
+        ``ASSISTANT_TEXT`` and its content, after path stripping, has at
+        least ``_MIN_STRIPPED_CONTENT_CHARS`` non-whitespace characters.
+        """
+        if seg.kind not in (TraceSegmentKind.TOOL_USE, TraceSegmentKind.ASSISTANT_TEXT):
+            return False
+        stripped = strip_path_segments(seg.content or "")
+        return len(stripped.strip()) >= _MIN_STRIPPED_CONTENT_CHARS
 
     def _rule_file_reread(self) -> None:
         """Rule: later tool_use of path P references earlier segments touching P."""
@@ -200,13 +270,11 @@ class ReferenceGraph:
                     tool_use_path_by_id[s.tool_use_id] = s.source_file
 
         # Propagate path labels into tool_results by their tool_use_id.
-        result_path: dict[int, str] = {}
         for i, s in enumerate(segs):
             if s.kind == TraceSegmentKind.TOOL_RESULT and s.tool_use_id:
                 p = tool_use_path_by_id.get(s.tool_use_id)
                 if p:
                     path_index[p].append(i)
-                    result_path[i] = p
 
         # Rule 1: file_reread. For each later tool_use with source_file=P,
         # add edges from all earlier path-tagged segments to that tool_use.
@@ -220,53 +288,54 @@ class ReferenceGraph:
                         self._add_edge(src, s, ReferenceEdgeKind.FILE_REREAD)
 
     def _rule_exact_quote(self) -> None:
-        """Rule: later tool_use/assistant_text quotes a ≥20-char run from an earlier tool_result."""
+        """Edges when a later message quotes a ≥20-char run from an earlier tool_result.
+
+        Paths are stripped from both source and target content before
+        gating so project path prefixes cannot collide with real quotes.
+        Listing-type tool_results (Glob/Grep/LS/Bash find) are excluded as
+        sources because their output is structural, not quotable.
+        """
         segs = self.trace.segments
-
-        # Rule 2: exact_quote. Build a lookup of long tokens from each
-        # tool_result, then scan later tool_use / assistant_text bodies
-        # for substring matches. We cap the quote length so the check
-        # stays O(N * avg_result_length).
-        # To bound cost, only use the first ~4 KB of each source segment.
-        result_excerpts: list[tuple[int, str]] = []
+        sources: list[tuple[int, str]] = [
+            (i, strip_path_segments(s.content)[:4096])
+            for i, s in enumerate(segs)
+            if self._is_quote_source(s)
+        ]
         for i, s in enumerate(segs):
-            if s.kind == TraceSegmentKind.TOOL_RESULT and s.content:
-                excerpt = s.content[:4096]
-                result_excerpts.append((i, excerpt))
-
-        for i, s in enumerate(segs):
-            if s.kind not in (
-                TraceSegmentKind.TOOL_USE,
-                TraceSegmentKind.ASSISTANT_TEXT,
-            ):
+            if not self._is_quote_target(s):
                 continue
-            if not s.content:
-                continue
-            target_body = s.content
-            for j, excerpt in result_excerpts:
+            target_body = strip_path_segments(s.content)
+            for j, excerpt in sources:
                 if j >= i:
                     break
-                # Heuristic: look for an identifier-like token from the
-                # result that appears verbatim in the target. We avoid a
-                # full substring sweep by scanning words of length ≥ 8
-                # from the excerpt.
-                hit = False
-                for match in _TOKEN_RE.finditer(excerpt):
-                    tok = match.group(0)
-                    if len(tok) >= 8 and tok.lower() not in _STOPWORDS and tok in target_body:
-                        hit = True
-                        break
-                if hit:
-                    # Confirm with a longer substring test to reduce noise.
-                    # Any 20+ char run from the excerpt that appears in the
-                    # target counts as a direct quote.
-                    for start in range(0, len(excerpt) - MIN_EXACT_QUOTE_CHARS, 64):
-                        chunk = excerpt[start : start + MIN_EXACT_QUOTE_CHARS]
-                        if chunk and chunk in target_body:
-                            src = segs[j]
-                            if src.seg_id != s.seg_id:
-                                self._add_edge(src, s, ReferenceEdgeKind.EXACT_QUOTE)
-                            break
+                if self._has_quote_match(excerpt, target_body):
+                    src = segs[j]
+                    if src.seg_id != s.seg_id:
+                        self._add_edge(src, s, ReferenceEdgeKind.EXACT_QUOTE)
+
+    def _has_quote_match(self, excerpt: str, target_body: str) -> bool:
+        """Two-stage gate: ≥8-char non-ambient identifier AND ≥20-char verbatim run.
+
+        The ambient-token filter is consulted via ``self._ambient_tokens``
+        which Task 4 initializes as empty; Task 5 populates it.
+        """
+        gating_token: str | None = None
+        for match in _TOKEN_RE.finditer(excerpt):
+            tok = match.group(0)
+            if len(tok) < 8 or tok.lower() in _STOPWORDS:
+                continue
+            if tok in self._ambient_tokens:
+                continue
+            if tok in target_body:
+                gating_token = tok
+                break
+        if gating_token is None:
+            return False
+        for start in range(0, max(1, len(excerpt) - MIN_EXACT_QUOTE_CHARS), 64):
+            chunk = excerpt[start : start + MIN_EXACT_QUOTE_CHARS]
+            if chunk and chunk in target_body:
+                return True
+        return False
 
     def _rule_ngram_overlap(self) -> None:
         """Rule: lenient-only paraphrase catch via shared 5-token distinctive shingles."""

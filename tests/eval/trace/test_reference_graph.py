@@ -167,6 +167,100 @@ class TestExactQuoteEdge:
         assert ReferenceEdgeKind.EXACT_QUOTE not in {e.kind for e in graph.edges}
 
 
+class TestExactQuoteSourceGuard:
+    def test_glob_tool_result_is_not_a_quote_source(self) -> None:
+        segs = [
+            _seg(
+                "tu_glob",
+                0,
+                0,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Glob pattern=**/*.py",
+                tool_name="Glob",
+                tool_use_id="g1",
+                source_file="/home/akougkas/projects/ctx-rm",
+            ),
+            _seg(
+                "tr_glob",
+                0,
+                1,
+                TraceSegmentKind.TOOL_RESULT,
+                "/home/akougkas/projects/ctx-rm/src/ctx_rm/core/bus.py\n"
+                "/home/akougkas/projects/ctx-rm/src/ctx_rm/core/segment.py",
+                tool_use_id="g1",
+            ),
+            _seg(
+                "tu_read",
+                1,
+                2,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Read file_path=/home/akougkas/projects/ctx-rm/src/ctx_rm/core/bus.py",
+                tool_name="Read",
+                tool_use_id="r1",
+                source_file="/home/akougkas/projects/ctx-rm/src/ctx_rm/core/bus.py",
+            ),
+        ]
+        g = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        assert all(e.kind != ReferenceEdgeKind.EXACT_QUOTE for e in g.edges)
+
+    def test_short_error_result_is_not_a_quote_source(self) -> None:
+        segs = [
+            _seg(
+                "tu",
+                0,
+                0,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Read file_path=/nope.py",
+                tool_name="Read",
+                tool_use_id="x",
+                source_file="/nope.py",
+            ),
+            _seg(
+                "tr",
+                0,
+                1,
+                TraceSegmentKind.TOOL_RESULT,
+                "File does not exist.",
+                tool_use_id="x",
+            ),
+            _seg(
+                "tu2",
+                1,
+                2,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Bash command=ls /nope.py",
+                tool_name="Bash",
+                tool_use_id="b1",
+            ),
+        ]
+        g = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        assert all(e.kind != ReferenceEdgeKind.EXACT_QUOTE for e in g.edges)
+
+    def test_path_only_shared_content_is_not_an_edge(self) -> None:
+        segs = [
+            _seg(
+                "tr",
+                0,
+                0,
+                TraceSegmentKind.TOOL_RESULT,
+                "Running in /home/akougkas/projects/awoc/src. Done.",
+                tool_use_id="x",
+            ),
+            _seg(
+                "tu",
+                1,
+                1,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Read file_path=/home/akougkas/projects/awoc/src/cli.ts",
+                tool_name="Read",
+                tool_use_id="y",
+                source_file="/home/akougkas/projects/awoc/src/cli.ts",
+            ),
+        ]
+        g = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        assert g.num_edges == 0
+
+
 class TestLenientNgramEdge:
     def test_shared_ngram_creates_lenient_edge(self) -> None:
         shared = "async function dispatches worker threads across multiple queues"
