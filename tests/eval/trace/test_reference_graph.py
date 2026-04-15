@@ -210,6 +210,33 @@ class TestLenientNgramEdge:
         assert lenient.num_edges >= strict.num_edges
 
 
+class TestPublicAPI:
+    def test_earliest_future_turn_returns_int_for_referenced_seg(self) -> None:
+        segs = [
+            _seg(
+                "tu1",
+                0,
+                0,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Read file_path=/a.py",
+                tool_name="Read",
+                source_file="/a.py",
+            ),
+            _seg(
+                "tu2",
+                3,
+                1,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Read file_path=/a.py",
+                tool_name="Read",
+                source_file="/a.py",
+            ),
+        ]
+        g = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        assert g.earliest_future_turn("tu1") == 3
+        assert g.earliest_future_turn("tu2") is None
+
+
 class TestSelfReferenceExcluded:
     def test_no_self_edge(self) -> None:
         segs = [

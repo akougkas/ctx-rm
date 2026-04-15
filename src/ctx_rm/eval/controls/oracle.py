@@ -49,7 +49,7 @@ class OraclePolicy(EvictionPolicy):
         needed: list[tuple[int, Segment]] = []  # Referenced; sort by distance.
         for seg in candidates:
             # Prefer the graph's labels. Missing labels => assume needed.
-            earliest = self._graph._earliest_future_turn.get(seg.seg_id)
+            earliest = self._graph.earliest_future_turn(seg.seg_id)
             if earliest is None or earliest <= self._current_turn:
                 safe.append(seg)
             else:
@@ -67,7 +67,7 @@ class OraclePolicy(EvictionPolicy):
         return self._fill_to_budget(ranked, tokens_to_free)
 
     def _reason(self, seg: Segment) -> str:
-        earliest = self._graph._earliest_future_turn.get(seg.seg_id)
+        earliest = self._graph.earliest_future_turn(seg.seg_id)
         if earliest is None or earliest <= self._current_turn:
             return "oracle:unreferenced"
         return f"oracle:next_ref_turn={earliest}"

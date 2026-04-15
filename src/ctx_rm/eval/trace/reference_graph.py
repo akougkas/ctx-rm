@@ -335,6 +335,13 @@ class ReferenceGraph:
         earliest = self._earliest_future_turn.get(seg_id)
         return earliest is not None and earliest > turn
 
+    def earliest_future_turn(self, seg_id: str) -> int | None:
+        """Smallest target.turn_index among edges whose source is seg_id.
+
+        Returns None when the segment is never referenced. Callers should
+        treat None as "safe to evict" under a future-only oracle."""
+        return self._earliest_future_turn.get(seg_id)
+
     def outgoing(self, seg_id: str) -> list[ReferenceEdge]:
         return list(self._out.get(seg_id, ()))
 

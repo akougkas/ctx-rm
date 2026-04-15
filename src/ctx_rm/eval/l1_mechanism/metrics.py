@@ -172,9 +172,6 @@ def _critical_segment_retention(
     average across snapshots; a snapshot with an empty critical set
     contributes 1.0 (trivially retaining nothing is perfect retention).
     """
-    # Precompute earliest-future-reference per segment once.
-    earliest = graph._earliest_future_turn
-
     # Precompute which segments exist as of each turn t so we don't give
     # credit for "retaining" segments that haven't been ingested yet.
     segs_in_order = sorted(trace.segments, key=lambda s: s.event_index)
@@ -189,7 +186,7 @@ def _critical_segment_retention(
         for sid, seg_turn in seg_turns.items():
             if seg_turn > t:
                 continue
-            next_ref = earliest.get(sid)
+            next_ref = graph.earliest_future_turn(sid)
             if next_ref is None:
                 continue
             if t < next_ref <= t + horizon:
