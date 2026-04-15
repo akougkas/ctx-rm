@@ -44,7 +44,6 @@ sys.path.insert(0, str(_REPO / "src"))
 from ctx_rm.eval.trace.claude_code import discover_transcripts, load_transcript  # noqa: E402
 from ctx_rm.eval.trace.normalize import normalize  # noqa: E402
 from ctx_rm.eval.trace.reference_graph import (  # noqa: E402
-    ReferenceEdgeKind,
     ReferenceGraph,
     ReferenceMode,
 )
@@ -228,7 +227,7 @@ def audit_trace(
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--trace-dir", type=Path, required=True)
+    p.add_argument("--trace-dir", type=Path, default=None)
     p.add_argument("--project", type=str, required=True)
     p.add_argument("--mode", type=str, default="strict", choices=["strict", "lenient"])
     p.add_argument("--n-traces", type=int, default=12)
@@ -238,10 +237,35 @@ def main() -> None:
     p.add_argument("--fn-per-trace", type=int, default=4)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", type=Path, required=True)
+    p.add_argument(
+        "--paths-file",
+        type=Path,
+        default=None,
+        help="JSON (phaseB0 split) or newline text file of trace paths; overrides --trace-dir walk",
+    )
+    p.add_argument(
+        "--split",
+        choices=("tuning", "validation", "all"),
+        default="all",
+        help="When --paths-file is a split JSON, pick which key to use",
+    )
     args = p.parse_args()
 
     rng = random.Random(args.seed)
-    paths = discover_transcripts(args.trace_dir)
+    if args.paths_file is not None:
+        raw = args.paths_file.read_text()
+        if args.paths_file.suffix == ".json":
+            blob = json.loads(raw)
+            if args.split == "all":
+                paths = [Path(p) for p in blob.get("tuning", []) + blob.get("validation", [])]
+            else:
+                paths = [Path(p) for p in blob[args.split]]
+        else:
+            paths = [Path(line.strip()) for line in raw.splitlines() if line.strip()]
+    else:
+        if args.trace_dir is None:
+            p.error("either --trace-dir or --paths-file is required")
+        paths = discover_transcripts(args.trace_dir)
     rng.shuffle(paths)
 
     loaded = 0
@@ -290,7 +314,11 @@ def main() -> None:
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w") as fh:
-        fh.write(json.dumps({"meta": {"loaded": loaded, "totals": totals, "args": vars(args) | {"trace_dir": str(args.trace_dir), "out": str(args.out)}}}) + "\n")
+        meta_args = {
+            k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()
+        }
+        meta_blob = {"meta": {"loaded": loaded, "totals": totals, "args": meta_args}}
+        fh.write(json.dumps(meta_blob) + "\n")
         for tr in per_trace_stats:
             fh.write(json.dumps({"trace_stat": tr}) + "\n")
         for r in records:
