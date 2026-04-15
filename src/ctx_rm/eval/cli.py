@@ -40,6 +40,7 @@ from ctx_rm.eval.stats.bootstrap import bootstrap_mean_ci
 from ctx_rm.eval.trace.claude_code import discover_transcripts, load_transcript
 from ctx_rm.eval.trace.normalize import normalize
 from ctx_rm.eval.trace.reference_graph import ReferenceGraph, ReferenceMode
+from ctx_rm.eval.trace.schema import Trace, TraceSegmentKind
 
 app = typer.Typer(help="ctx-rm evaluation suite")
 console = Console()
@@ -87,12 +88,21 @@ def cmd_l1(
         help="Comma-separated policies from: " + ",".join(sorted(_POLICY_REGISTRY)),
     ),
     budgets: str = typer.Option(
-        "8000,32000,128000", "--budgets", help="Comma-separated token budgets"
+        "4000,8000,16000,32000", "--budgets", help="Comma-separated token budgets"
     ),
     mode: str = typer.Option("strict", "--mode", help="Reference graph mode: strict or lenient"),
     max_traces: int = typer.Option(0, "--max-traces", help="If >0, cap number of traces loaded"),
     min_segments: int = typer.Option(
-        10, "--min-segments", help="Skip traces with fewer than N segments"
+        40, "--min-segments", help="Skip traces with fewer than N segments"
+    ),
+    min_turns: int = typer.Option(
+        8, "--min-turns", help="Skip traces with fewer than N assistant turns"
+    ),
+    min_tool_use: int = typer.Option(
+        8, "--min-tool-use", help="Skip traces with fewer than N tool_use segments"
+    ),
+    min_rereads: int = typer.Option(
+        1, "--min-rereads", help="Skip traces with fewer than N file rereads"
     ),
     output_json: Path | None = typer.Option(
         None, "--json", help="Optional path to dump the full metric records as JSON"
@@ -139,25 +149,59 @@ def cmd_l1(
         paths = paths[:max_traces]
     console.print(f"  found {len(paths)} transcripts")
 
+    def _passes_filter(trace: Trace) -> bool:
+        if len(trace.segments) < min_segments:
+            return False
+        if trace.num_turns < min_turns:
+            return False
+        tool_uses = sum(1 for s in trace.segments if s.kind == TraceSegmentKind.TOOL_USE)
+        if tool_uses < min_tool_use:
+            return False
+        seen: set[str] = set()
+        rereads = 0
+        for s in trace.segments:
+            if s.kind == TraceSegmentKind.TOOL_USE and s.source_file:
+                if s.source_file in seen:
+                    rereads += 1
+                else:
+                    seen.add(s.source_file)
+        return rereads >= min_rereads
+
+    console.print(
+        f"  filter: segs>={min_segments} turns>={min_turns} "
+        f"tool_use>={min_tool_use} rereads>={min_rereads}"
+    )
+
     traces_and_graphs: list[tuple] = []
+    n_load_err = 0
+    n_filtered = 0
     for p in paths:
         try:
             loaded = load_transcript(p)
             trace = normalize(loaded, project=project)
         except Exception as exc:
+            n_load_err += 1
             console.print(f"  [yellow]skip {p.name}: {exc}[/yellow]")
             continue
-        if len(trace.segments) < min_segments:
+        if not _passes_filter(trace):
+            n_filtered += 1
             continue
         graph = ReferenceGraph.build(trace, ref_mode)
         traces_and_graphs.append((trace, graph))
+
+    console.print(
+        f"  filter cascade: {len(paths)} scanned -> "
+        f"{n_load_err} load errors, {n_filtered} filtered, "
+        f"{len(traces_and_graphs)} kept"
+    )
 
     if not traces_and_graphs:
         console.print("[red]No usable traces after filtering.[/red]")
         raise typer.Exit(code=1)
 
     console.print(
-        f"  using {len(traces_and_graphs)} traces (ref mode={ref_mode.value}, seed={seed})"
+        f"  using {len(traces_and_graphs)} / {len(paths)} traces "
+        f"(ref mode={ref_mode.value}, seed={seed})"
     )
 
     rows: list[tuple[str, L1Metrics]] = []
