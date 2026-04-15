@@ -1,0 +1,16 @@
+/home/akougkas/.claude/projects/-home-akougkas-projects-awoc/18007403-a9d9-438d-a71a-f807f8c8b590/subagents/agent-af13ba77f92eed2e9.jsonl
+/home/akougkas/.claude/projects/-home-akougkas-projects-awoc/3574ee13-b4fc-40b1-a438-f17eb81b91f0/subagents/agent-a974f5ab3f353c6b7.jsonl
+/home/akougkas/.claude/projects/-home-akougkas-projects-awoc/4d9cf4c7-a489-48c6-a683-545b61e2fc56/subagents/agent-a956c23d643ce5333.jsonl
+/home/akougkas/.claude/projects/-home-akougkas-projects-awoc/53a53a49-b265-4d6a-b264-92933998edcf/subagents/agent-a3018c175883e4830.jsonl
+/home/akougkas/.claude/projects/-home-akougkas-projects-awoc/5ad2f9bf-f6ce-4fce-9e56-c70e2c58149e/subagents/agent-a534d895e6586dbcb.jsonl
+/home/akougkas/.claude/projects/-home-akougkas-projects-awoc/997fac1c-229b-4013-9db4-f5f1a90ec711/subagents/agent-aa622c1107037b5cc.jsonl
+/home/akougkas/.claude/projects/-home-akougkas-projects-awoc/9e905d71-4941-46b0-9767-693b44d85a2d/subagents/agent-a8c54b6b869ae307b.jsonl
+/home/akougkas/.claude/projects/-home-akougkas-projects-awoc/9fd18347-53d9-49d4-872b-1207cb111fab/subagents/agent-a0a0f00791fc8a2f8.jsonl
+/home/akougkas/.claude/projects/-home-akougkas-projects-awoc/c477288b-05f8-4881-ad2e-4a04e45b08cc/subagents/agent-a664075ea35b0a7d4.jsonl
+/home/akougkas/.claude/projects/-home-akougkas-projects-awoc/db191dd2-daa3-4209-9b9f-57bb37e689ad/subagents/agent-a4addc88bd2d00e7c.jsonl
+/home/akougkas/.claude/projects/-home-akougkas-projects-awoc/db191dd2-daa3-4209-9b9f-57bb37e689ad/subagents/agent-ac8e8b8d8da63fd86.jsonl
+/home/akougkas/.claude/projects/-home-akougkas-projects-awoc/f2048fcc-4779-40f8-ae13-237acb9f58bd/subagents/agent-a8ecda05678d750e4.jsonl
+/home/akougkas/.claude/projects/-home-akougkas-projects-ctx-rm/15687993-bf94-4a35-85ee-2e5e190eb0f8.jsonl
+/home/akougkas/.claude/projects/-home-akougkas-projects-ctx-rm/68e1be56-c100-43ef-8d88-86b218a307d4.jsonl
+/home/akougkas/.claude/projects/-home-akougkas-projects-ctx-rm/68e1be56-c100-43ef-8d88-86b218a307d4/subagents/agent-a22beb2d20c4665f6.jsonl
+/home/akougkas/.claude/projects/-home-akougkas-projects-ctx-rm/68e1be56-c100-43ef-8d88-86b218a307d4/subagents/agent-a323037ded573b602.jsonl
