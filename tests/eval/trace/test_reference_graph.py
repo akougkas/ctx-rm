@@ -261,6 +261,91 @@ class TestExactQuoteSourceGuard:
         assert g.num_edges == 0
 
 
+class TestAmbientTokenFilter:
+    def test_identifier_in_most_results_does_not_gate_quote(self) -> None:
+        result_bodies = [
+            "SessionManager initialized. Some long unique content-A here "
+            "with enough characters to clear the stripped-length gate.",
+            "SessionManager starting. Unrelated body-B with another set of "
+            "words padding the stripped length over forty chars easily.",
+            "SessionManager shutdown. Totally distinct body-C also longer "
+            "than forty characters after path stripping, guaranteed.",
+            "SessionManager waiting. Yet another body-D with its own padding "
+            "so every result clears the stripped length threshold.",
+        ]
+        segs: list[TraceSegment] = []
+        for i, body in enumerate(result_bodies):
+            segs.append(
+                _seg(
+                    f"tu{i}",
+                    i,
+                    i * 2,
+                    TraceSegmentKind.TOOL_USE,
+                    "tool_use:Read file_path=/x.py",
+                    tool_name="Read",
+                    tool_use_id=f"id{i}",
+                    source_file="/x.py",
+                )
+            )
+            segs.append(
+                _seg(
+                    f"tr{i}",
+                    i,
+                    i * 2 + 1,
+                    TraceSegmentKind.TOOL_RESULT,
+                    body,
+                    tool_use_id=f"id{i}",
+                )
+            )
+        segs.append(
+            _seg(
+                "at",
+                4,
+                999,
+                TraceSegmentKind.ASSISTANT_TEXT,
+                "SessionManager was invoked twice and the handler exited "
+                "cleanly after draining the queue, writing the final log.",
+            )
+        )
+        g = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        for e in g.edges:
+            assert e.kind != ReferenceEdgeKind.EXACT_QUOTE or e.target_seg_id != "at"
+
+    def test_distinctive_identifier_still_gates_quote(self) -> None:
+        unique = "authenticate_user_with_token_v42"
+        segs = [
+            _seg(
+                "tu",
+                0,
+                0,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Read file_path=/auth.py",
+                tool_name="Read",
+                tool_use_id="id1",
+                source_file="/auth.py",
+            ),
+            _seg(
+                "tr",
+                0,
+                1,
+                TraceSegmentKind.TOOL_RESULT,
+                f"The function {unique} returns a JWT bearer token "
+                f"after validating the signature against the public key.",
+                tool_use_id="id1",
+            ),
+            _seg(
+                "at",
+                1,
+                2,
+                TraceSegmentKind.ASSISTANT_TEXT,
+                f"Looking at {unique}, it returns a JWT bearer token "
+                f"after validating the signature.",
+            ),
+        ]
+        g = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        assert any(e.kind == ReferenceEdgeKind.EXACT_QUOTE for e in g.edges)
+
+
 class TestLenientNgramEdge:
     def test_shared_ngram_creates_lenient_edge(self) -> None:
         shared = "async function dispatches worker threads across multiple queues"

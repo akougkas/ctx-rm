@@ -64,6 +64,14 @@ _LISTING_BASH_COMMANDS = frozenset(
 )
 _MIN_STRIPPED_CONTENT_CHARS = 40
 
+# Ambient-token index. A token appearing in more than
+# _AMBIENT_FREQUENCY_THRESHOLD of a trace's tool_results is treated as
+# boilerplate for that trace and cannot gate a quote edge. Traces with
+# fewer than _AMBIENT_MIN_RESULTS_FOR_INDEX tool_results skip the filter
+# because the signal is noise at that sample size.
+_AMBIENT_MIN_RESULTS_FOR_INDEX = 4
+_AMBIENT_FREQUENCY_THRESHOLD = 0.25
+
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
 _STOPWORDS = frozenset(
     {
@@ -191,7 +199,8 @@ class ReferenceGraph:
             for s in self.trace.segments
             if s.kind == TraceSegmentKind.TOOL_USE and s.tool_use_id
         }
-        self._ambient_tokens: set[str] = set()  # populated by Task 5
+        self._ambient_tokens: set[str] = set()
+        self._build_ambient_index()
         self._rule_file_reread()
         self._rule_exact_quote()
         if self.mode == ReferenceMode.LENIENT:
@@ -239,6 +248,37 @@ class ReferenceGraph:
             return False
         stripped = strip_path_segments(seg.content or "")
         return len(stripped.strip()) >= _MIN_STRIPPED_CONTENT_CHARS
+
+    def _build_ambient_index(self) -> None:
+        """Populate ``self._ambient_tokens`` with per-trace boilerplate.
+
+        A distinctive identifier (length ≥ 8, non-stopword) is flagged as
+        ambient if it appears in more than
+        ``_AMBIENT_FREQUENCY_THRESHOLD`` of this trace's tool_results. The
+        filter is skipped entirely on traces with fewer than
+        ``_AMBIENT_MIN_RESULTS_FOR_INDEX`` tool_results because the
+        frequency signal is too noisy at that sample size.
+        """
+        result_segs = [
+            s
+            for s in self.trace.segments
+            if s.kind == TraceSegmentKind.TOOL_RESULT and s.content
+        ]
+        if len(result_segs) < _AMBIENT_MIN_RESULTS_FOR_INDEX:
+            return
+        counts: dict[str, int] = {}
+        for s in result_segs:
+            stripped = strip_path_segments(s.content[:4096])
+            tokens = {
+                m.group(0)
+                for m in _TOKEN_RE.finditer(stripped)
+                if len(m.group(0)) >= 8 and m.group(0).lower() not in _STOPWORDS
+            }
+            for t in tokens:
+                counts[t] = counts.get(t, 0) + 1
+        total = len(result_segs)
+        threshold = _AMBIENT_FREQUENCY_THRESHOLD * total
+        self._ambient_tokens = {t for t, c in counts.items() if c > threshold}
 
     def _is_quote_target(self, seg: TraceSegment) -> bool:
         """Return True iff ``seg`` may receive an exact-quote edge.
