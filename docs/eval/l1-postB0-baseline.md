@@ -1,336 +1,300 @@
-# L1 post-B0 baseline — awoc, 131 traces
+# L1 post-B0 baseline: awoc, 131 traces
 
-On 131 agent traces across four budgets, two reference modes, and two
-admission settings, LRU, ARC, and InnoDB produce bit-identical eviction
-sequences in every cell while oracle retains a 10 to 16 percentage-point
-headroom at working-set budgets. The tie is a structural property of
-agent workloads, not an artifact of ctx-rm.
+On 131 agent traces across four budgets, two reference modes, and two admission
+settings, LRU, ARC, and InnoDB remain near-identical on the real corpus even
+after the replay re-access fix from T14. The exact 16-cell identity is gone,
+but the separation is tiny. The largest retention spread inside the
+LRU/ARC/InnoDB cluster is 0.0037 in strict mode and 0.0056 in
+lenient mode. Oracle still keeps a clear headroom lead at working-set budgets.
 
 ## Methodology
 
-Corpus: `~/.claude/projects/-home-akougkas-projects-awoc`, 200 raw
-transcripts. Filter cascade: `segs>=40 turns>=8 tool_use>=8 rereads>=1`.
-After filtering, **131 / 200 traces** survived (69 filtered, 0 load
-errors). The same 131 traces drive every row in every table below.
+Corpus: `~/.claude/projects/-home-akougkas-projects-awoc`, 200 raw transcripts.
+Filter cascade: `segs>=40 turns>=8 tool_use>=8 rereads>=1`. After filtering,
+**131 / 200 traces** survived. The same 131 traces drive every row in every
+table below.
 
-Policies: `oracle,random,lru,clock,budget,arc,innodb`. Budgets: `4000,
-8000, 16000, 32000`. Seed: 0. Reference modes: strict and lenient.
-Admission modes: `on` (default 2000-token bypass) and `off`
-(`disable_bypass=True`, threshold raised to `sys.maxsize`).
+Policies: `oracle,random,lru,clock,budget,arc,innodb`. Budgets:
+`4000, 8000, 16000, 32000`. Seed: 0. Reference modes: strict and lenient.
+Admission modes: `on` uses the default 2000-token bypass. `off` sets
+`disable_bypass=True` so replay measures eviction without admission bypass.
 
-Metrics. `retention` is the new all-future critical-segment retention
-(T9, replacing retention@5); `retention@10` is the short-horizon
-secondary column. Eviction precision and recall are strict-graph
-definitions. Churn is effectively zero across the corpus because L1
-never issues recalls; it is kept in the tables for consistency with the
-pre-B0 shape. Every cell prints `mean [low, high]` with a 95 % bootstrap
-CI over traces (`n=131`, percentile bootstrap, seed 0).
+Metrics. `retention` is the all-future critical-segment retention from T9.
+`retention@10` is the short-horizon companion. Every cell prints
+`mean [low, high]` with a 95 percent bootstrap CI over traces using the
+percentile bootstrap with seed 0.
 
-Source runs (bypass=both, both modes, same seed):
-`results/b0_awoc_strict.json`, `results/b0_awoc_lenient.json`.
+Source runs: `results/b0_awoc_strict.json`, `results/b0_awoc_lenient.json`.
+These files were regenerated after T14 option `(b)` so the published baseline
+now matches the final replay code.
 
 ## Headline findings
 
-1. **LRU = ARC = InnoDB at four decimals in every one of the 16 (mode,
-   bypass, budget) cells.** This reproduces the A5 "suspicious identity"
-   on a corpus that is 1.77× larger and under a harder retention metric.
-   The three implementations use different internal state — LRU's
-   recency list, ARC's T1/T2/B1/B2 four-list adaptive partition, InnoDB's
-   midpoint-insertion LRU — and they still converge to identical
-   eviction sequences. See T14 for the mechanism writeup.
-2. **Oracle's headroom is robust at working-set budgets and collapses
-   at the tie-ceiling budget.** Strict bypass=off: oracle −
-   LRU-cluster = 0.164 at 4 k, 0.158 at 8 k, 0.122 at 16 k, 0.070 at
-   32 k. Strict bypass=on: 0.134 / 0.066 / 0.019 / 0.002. The 32 k
-   strict bypass=on cell prints a 0.002 pp oracle lead, which is the
-   "tie ceiling" A2 warned about — at that budget almost nothing is
-   evicted, so every policy looks the same.
-3. **BudgetAware is last under strict at every working-set budget and
-   climbs to second place under lenient at 4 k and 8 k.** This
-   reproduces the strict-vs-lenient flip from A5 at larger n and is the
-   same signal that BudgetAware's role weights penalize tool_result
-   content the strict graph considers critical. The fix is deferred to
-   Phase B (B5).
-4. **Random is competitive with the LRU cluster on retention and
-   sometimes beats it on eviction precision.** Under strict bypass=off
-   at 8 k, random retention = 0.680 vs LRU cluster 0.680 (identical
-   means, CIs overlap); random precision = 0.684 vs LRU cluster 0.672.
-   This is not because random is clever, it is because the re-access
-   signal in agent traces is so weak that *nothing* concentrates
-   retention on the critical set.
-5. **Strict eviction precision numbers survived the graph rewrite.**
-   Pre-B0 strict oracle precision at 8 k (retention@5, 74 traces) was
-   0.671 [0.623, 0.719]. Post-B0 strict oracle precision at 8 k (same
-   budget, 131 traces) is 0.680 [0.649, 0.708]. Within CI overlap, the
-   hardened strict graph is not systematically softer or harder — the
-   graph rewrite tightened precision per-rule (file_reread 1.000,
-   file_discovery 0.951) and the pooled metric stayed flat because
-   `exact_quote` still trails on the validation split (0.236).
+1. **LRU, ARC, and InnoDB are still effectively tied on real agent traces.**
+   In strict mode, only 1 of the 8 strict cells are exactly equal in
+   retention, and 4 of 8 are equal at three decimals. In lenient
+   mode, the same counts are 1 exact and 4 of 8 at three decimals.
+   The biggest retention spread inside the cluster is 0.0037 in strict
+   `off` / `8000` and 0.0056 in lenient
+   `off` / `8000`. The T14 replay fix created a real
+   separation path, but on this corpus it barely moves the aggregate story.
+2. **Oracle still has meaningful headroom at working-set budgets.** Strict
+   bypass=off oracle minus LRU retention is
+   0.164 / 0.158 /
+   0.122 / 0.069 at
+   4k / 8k / 16k / 32k. Strict bypass=on is
+   0.134 / 0.067 /
+   0.018 / 0.002. The 32k bypass=on
+   cell remains the tie ceiling where almost nothing gets evicted.
+3. **BudgetAware is still the weakest strict policy at working-set budgets.**
+   It remains last under strict mode at 4k, 8k, and 16k, while lenient mode
+   makes it look more competitive. That continues the A5 signal that
+   BudgetAware underweights tool-result content the strict graph considers
+   critical.
+4. **Random remains surprisingly competitive.** Under strict bypass=off at 8k,
+   random retention is `0.680` while LRU is `0.680`, ARC is `0.679`, and
+   InnoDB is `0.676`. This still says more about weak re-access structure in
+   agent traces than about random being a good policy.
+5. **The graph hardening story still holds.** Pre-B0 strict oracle precision at
+   8k under the old retention@5 setup was `0.671 [0.623, 0.719]`. Post-B0
+   strict oracle precision at 8k is `0.680 [0.649, 0.708]`. Post-B0 lenient
+   oracle precision at 8k is `0.273 [0.257, 0.288]`. Within the expected
+   mode gap, the hardened graph preserved the basic strict-vs-lenient picture.
 
 ## Key deltas versus A5
 
-| measurement | pre-B0 (A5) | post-B0 | change |
+| measurement | pre-B0 (A5) | post-B0 rerun | change |
 | --- | :-: | :-: | :-: |
 | corpus size | 74 | 131 | +57 traces |
 | headline retention metric | retention@5 | all-future retention | redefined |
-| oracle retention, strict bypass=off, 8 k | 0.899 [0.874, 0.923] (k=5) | 0.838 [0.797, 0.872] | all-future is harder |
-| LRU retention, strict bypass=off, 8 k | 0.851 [0.824, 0.874] (k=5) | 0.680 [0.636, 0.722] | all-future is harder |
-| oracle − LRU headroom, 8 k | 0.048 | 0.158 | +0.110 pp |
-| oracle eviction precision, strict 8 k | 0.671 [0.623, 0.719] | 0.680 [0.649, 0.708] | flat |
-| oracle eviction precision, lenient 8 k | 0.270 [0.232, 0.312] | 0.273 [0.257, 0.288] | flat |
-| LRU=ARC=InnoDB tie | 2 cells | 16 cells (all) | structural |
-| BudgetAware strict vs lenient flip | present at 8 k | present at 4 k and 8 k | stable |
+| oracle retention, strict bypass=off, 8k | 0.899 [0.874, 0.923] (k=5) | 0.838 [0.797, 0.872] | all-future is harder |
+| LRU retention, strict bypass=off, 8k | 0.851 [0.824, 0.874] (k=5) | 0.680 [0.636, 0.722] | all-future is harder |
+| oracle minus LRU headroom, strict 8k | 0.048 | 0.158 | wider gap |
+| oracle eviction precision, strict 8k | 0.671 [0.623, 0.719] | 0.680 [0.649, 0.708] | flat within CI |
+| oracle eviction precision, lenient 8k | 0.270 [0.232, 0.312] | 0.273 [0.257, 0.288] | flat within CI |
+| LRU / ARC / InnoDB equality | tie at 2 cells | near-tie across all 16 cells | tiny separation after T14(b) |
+| BudgetAware strict vs lenient flip | present at 8k | present at 4k and 8k | stable |
 
-The retention metric change is the biggest single mover in the table.
-All-future retention penalizes every eviction of a later-referenced
-segment, not just segments referenced within the next 5 turns, so the
-absolute numbers are lower and the oracle-vs-LRU gap is wider. This was
-expected; A3 warned that retention@5 was hiding the policy gap by
-truncating the horizon. The gap is now visible without the truncation.
+The retention metric swap remains the biggest move in the table. All-future
+retention penalizes every eviction of a later-referenced segment, not just the
+next few turns, so the absolute numbers are lower and the oracle gap is wider.
+The T14 replay fix matters much less on aggregate. It breaks the formal tie,
+but only by a few thousandths on this corpus.
 
 ## Framing decision
 
-The three-policy tie is not a ctx-rm implementation artifact. Three
-independent policies with different internal state converge on identical
-eviction sequences in 16 out of 16 cells. This is a statement about the
-workload. ARC and InnoDB were engineered to beat LRU by exploiting
-frequency and scan resistance. Agent traces overwhelmingly touch each
-segment once and then move on, so the signals ARC and InnoDB use to
-differentiate themselves from LRU never fire. Oracle's 10 to 16
-percentage-point lead proves the headroom exists and is reachable with
-future knowledge, so the degeneracy is not "every policy is equally
-good" — it is "classical re-access heuristics all collapse to the same
-point, far from the ceiling." That is a measurable, previously
-unreported property of agent context workloads, and the tool that
-surfaces it is the paper contribution.
-
-The T14 investigation will confirm the mechanism. If T14 option (b)
-lands and a reactive-ARC variant separates from LRU, the headline
-becomes "standard-library ARC silently degrades to LRU on agent
-workloads, and here is the fix." If it does not separate, the headline
-becomes "even a reactive ARC cannot separate from LRU because the
-re-access signal is absent." Both stories are publishable under the
-same framing.
+The strongest reading after the rerun is this: classical re-access heuristics
+still collapse toward the same operating point on agent traces, even after we
+add an honest replay-time signal for repeated evicted tool-result content.
+That matters because it rules out the strongest version of the “ctx-rm made ARC
+look bad” objection. We gave ARC and InnoDB a real path to react. They do react
+on crafted regression traces, and they still barely separate from LRU on the
+real corpus. The workload remains the main story.
 
 ## Caveats
 
-- `exact_quote` strict precision on the held-out validation split is
-  0.236 (see `docs/eval/phaseB-reference-graph.md`). Roughly three of
-  every four edges that rule contributes on unseen traces are false
-  positives. The Phase C fix ("require the verbatim window to contain
-  the gating identifier token") is not applied in B0 to preserve the
-  validation split. The three-policy tie is *eviction-sequence
-  identity*, not a precision equality, so it is invariant to
-  `exact_quote` noise; the absolute precision numbers in the strict
-  tables below should be read with that 17.6 pp tuning-to-validation
-  gap in mind.
-- Churn is 0.000 in every cell because L1 never issues recalls.
-- Random's parity with LRU is a corpus fact, not an experimental error;
-  see finding 4.
-- ctx-rm-corpus traces are not included. After the filter cascade only
-  5 ctx-rm traces survive, which is below the bootstrap floor.
+- `exact_quote` strict precision on the held-out validation split is still
+  0.236. That remains a known limitation of the strict graph. The fix is
+  deferred to Phase C so the held-out split stays honest.
+- Churn is 0.000 in every cell because L1 replay still does not issue recalls.
+- The rerun only refreshed the awoc baseline. ctx-rm corpus traces remain below
+  the sample floor after filtering.
 
 ## Tables
 
 ### Strict reference mode
 
-#### strict · bypass=off · budget=4000
+#### strict / bypass=off / budget=4000
 
 | policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| oracle | 131 | 0.735 [0.691, 0.775] | 0.807 [0.774, 0.836] | 0.686 [0.658, 0.715] | 0.780 [0.745, 0.819] | 0.000 [0.000, 0.000] | 40521 [35838, 45648] |
-| random | 131 | 0.568 [0.527, 0.605] | 0.658 [0.625, 0.687] | 0.693 [0.666, 0.718] | 0.728 [0.692, 0.762] | 0.000 [0.000, 0.000] | 40087 [35430, 45149] |
-| lru | 131 | 0.571 [0.527, 0.611] | 0.663 [0.627, 0.693] | 0.684 [0.655, 0.713] | 0.775 [0.739, 0.815] | 0.000 [0.000, 0.000] | 40512 [35836, 45647] |
-| clock | 131 | 0.573 [0.529, 0.614] | 0.665 [0.629, 0.696] | 0.681 [0.651, 0.710] | 0.764 [0.725, 0.803] | 0.000 [0.000, 0.000] | 40363 [35699, 45528] |
-| budget | 131 | 0.542 [0.502, 0.578] | 0.630 [0.598, 0.657] | 0.594 [0.554, 0.635] | 0.576 [0.535, 0.618] | 0.000 [0.000, 0.000] | 39958 [35241, 45108] |
-| arc | 131 | 0.571 [0.527, 0.611] | 0.663 [0.627, 0.693] | 0.684 [0.655, 0.713] | 0.775 [0.739, 0.815] | 0.000 [0.000, 0.000] | 40512 [35836, 45647] |
-| innodb | 131 | 0.571 [0.527, 0.611] | 0.663 [0.627, 0.693] | 0.684 [0.655, 0.713] | 0.775 [0.739, 0.815] | 0.000 [0.000, 0.000] | 40512 [35836, 45647] |
+| oracle | 131 | 0.735 [0.691, 0.775] | 0.807 [0.774, 0.836] | 0.686 [0.658, 0.715] | 0.780 [0.745, 0.819] | 0.000 [0.000, 0.000] | 40521.855 [35838.214, 45648.641] |
+| random | 131 | 0.568 [0.527, 0.605] | 0.658 [0.625, 0.687] | 0.693 [0.666, 0.718] | 0.728 [0.692, 0.762] | 0.000 [0.000, 0.000] | 40087.588 [35430.511, 45149.107] |
+| lru | 131 | 0.571 [0.527, 0.611] | 0.663 [0.627, 0.693] | 0.684 [0.655, 0.713] | 0.775 [0.739, 0.815] | 0.000 [0.000, 0.000] | 40512.008 [35836.725, 45647.046] |
+| clock | 131 | 0.573 [0.529, 0.614] | 0.665 [0.629, 0.696] | 0.681 [0.651, 0.710] | 0.764 [0.725, 0.803] | 0.000 [0.000, 0.000] | 40363.000 [35699.626, 45528.214] |
+| budget | 131 | 0.542 [0.500, 0.578] | 0.629 [0.596, 0.654] | 0.594 [0.554, 0.635] | 0.576 [0.535, 0.618] | 0.000 [0.000, 0.000] | 39942.924 [35233.427, 45094.420] |
+| arc | 131 | 0.571 [0.527, 0.611] | 0.663 [0.627, 0.693] | 0.684 [0.655, 0.713] | 0.775 [0.739, 0.814] | 0.000 [0.000, 0.000] | 40511.931 [35836.557, 45647.008] |
+| innodb | 131 | 0.569 [0.525, 0.609] | 0.661 [0.626, 0.693] | 0.684 [0.655, 0.714] | 0.776 [0.740, 0.814] | 0.000 [0.000, 0.000] | 40409.053 [35754.771, 45540.130] |
 
-#### strict · bypass=off · budget=8000
-
-| policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| oracle | 131 | 0.838 [0.797, 0.872] | 0.885 [0.855, 0.910] | 0.680 [0.649, 0.708] | 0.626 [0.578, 0.673] | 0.000 [0.000, 0.000] | 36893 [32231, 41988] |
-| random | 131 | 0.680 [0.638, 0.719] | 0.742 [0.709, 0.771] | 0.684 [0.655, 0.713] | 0.589 [0.549, 0.626] | 0.000 [0.000, 0.000] | 36998 [32303, 42090] |
-| lru | 131 | 0.680 [0.636, 0.722] | 0.749 [0.716, 0.781] | 0.672 [0.640, 0.702] | 0.619 [0.570, 0.667] | 0.000 [0.000, 0.000] | 36901 [32240, 41989] |
-| clock | 131 | 0.672 [0.629, 0.714] | 0.741 [0.707, 0.771] | 0.672 [0.641, 0.700] | 0.599 [0.555, 0.645] | 0.000 [0.000, 0.000] | 36897 [32210, 42045] |
-| budget | 131 | 0.660 [0.620, 0.699] | 0.721 [0.690, 0.748] | 0.526 [0.483, 0.571] | 0.399 [0.357, 0.441] | 0.000 [0.000, 0.000] | 36710 [32107, 41827] |
-| arc | 131 | 0.680 [0.636, 0.722] | 0.749 [0.716, 0.781] | 0.672 [0.640, 0.702] | 0.619 [0.570, 0.667] | 0.000 [0.000, 0.000] | 36901 [32240, 41989] |
-| innodb | 131 | 0.680 [0.636, 0.722] | 0.749 [0.716, 0.781] | 0.672 [0.640, 0.702] | 0.619 [0.570, 0.667] | 0.000 [0.000, 0.000] | 36901 [32240, 41989] |
-
-#### strict · bypass=off · budget=16000
+#### strict / bypass=off / budget=8000
 
 | policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| oracle | 131 | 0.919 [0.886, 0.945] | 0.950 [0.931, 0.966] | 0.724 [0.691, 0.757] | 0.431 [0.382, 0.480] | 0.000 [0.000, 0.000] | 30886 [26239, 36037] |
-| random | 131 | 0.794 [0.760, 0.827] | 0.835 [0.806, 0.862] | 0.722 [0.690, 0.753] | 0.456 [0.410, 0.501] | 0.000 [0.000, 0.000] | 30871 [26228, 35996] |
-| lru | 131 | 0.797 [0.759, 0.833] | 0.841 [0.809, 0.869] | 0.714 [0.680, 0.747] | 0.413 [0.367, 0.460] | 0.000 [0.000, 0.000] | 30831 [26198, 35893] |
-| clock | 131 | 0.803 [0.766, 0.840] | 0.846 [0.815, 0.874] | 0.698 [0.662, 0.734] | 0.404 [0.358, 0.449] | 0.000 [0.000, 0.000] | 30849 [26199, 35905] |
-| budget | 131 | 0.771 [0.733, 0.808] | 0.808 [0.777, 0.837] | 0.576 [0.531, 0.621] | 0.298 [0.261, 0.334] | 0.000 [0.000, 0.000] | 30505 [25931, 35586] |
-| arc | 131 | 0.797 [0.759, 0.833] | 0.841 [0.809, 0.869] | 0.714 [0.680, 0.747] | 0.413 [0.367, 0.460] | 0.000 [0.000, 0.000] | 30831 [26198, 35893] |
-| innodb | 131 | 0.797 [0.759, 0.833] | 0.841 [0.809, 0.869] | 0.714 [0.680, 0.747] | 0.413 [0.367, 0.460] | 0.000 [0.000, 0.000] | 30831 [26198, 35893] |
+| oracle | 131 | 0.838 [0.797, 0.872] | 0.885 [0.855, 0.910] | 0.680 [0.649, 0.708] | 0.626 [0.578, 0.673] | 0.000 [0.000, 0.000] | 36893.443 [32231.023, 41988.687] |
+| random | 131 | 0.680 [0.638, 0.719] | 0.742 [0.709, 0.771] | 0.684 [0.655, 0.713] | 0.589 [0.549, 0.626] | 0.000 [0.000, 0.000] | 36998.466 [32303.908, 42090.939] |
+| lru | 131 | 0.680 [0.636, 0.722] | 0.749 [0.716, 0.781] | 0.672 [0.640, 0.702] | 0.619 [0.570, 0.667] | 0.000 [0.000, 0.000] | 36901.359 [32240.252, 41989.069] |
+| clock | 131 | 0.672 [0.629, 0.714] | 0.741 [0.707, 0.771] | 0.672 [0.641, 0.700] | 0.599 [0.555, 0.645] | 0.000 [0.000, 0.000] | 36897.351 [32210.214, 42045.511] |
+| budget | 131 | 0.660 [0.620, 0.699] | 0.721 [0.690, 0.749] | 0.526 [0.483, 0.571] | 0.399 [0.357, 0.442] | 0.000 [0.000, 0.000] | 36717.176 [32109.504, 41829.023] |
+| arc | 131 | 0.679 [0.636, 0.721] | 0.749 [0.715, 0.781] | 0.673 [0.641, 0.702] | 0.622 [0.575, 0.670] | 0.000 [0.000, 0.000] | 36869.626 [32218.008, 41970.878] |
+| innodb | 131 | 0.676 [0.633, 0.718] | 0.746 [0.712, 0.778] | 0.673 [0.641, 0.703] | 0.628 [0.579, 0.676] | 0.000 [0.000, 0.000] | 36834.206 [32179.702, 41871.473] |
 
-#### strict · bypass=off · budget=32000
-
-| policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| oracle | 131 | 0.983 [0.968, 0.993] | 0.990 [0.983, 0.996] | 0.810 [0.779, 0.845] | 0.233 [0.186, 0.283] | 0.000 [0.000, 0.000] | 20182 [15808, 25073] |
-| random | 131 | 0.917 [0.892, 0.937] | 0.934 [0.914, 0.950] | 0.817 [0.782, 0.850] | 0.234 [0.192, 0.275] | 0.000 [0.000, 0.000] | 19738 [15629, 24862] |
-| lru | 131 | 0.913 [0.886, 0.937] | 0.928 [0.905, 0.949] | 0.797 [0.764, 0.832] | 0.211 [0.169, 0.257] | 0.000 [0.000, 0.000] | 19916 [15716, 24837] |
-| clock | 131 | 0.919 [0.895, 0.941] | 0.933 [0.910, 0.953] | 0.806 [0.775, 0.840] | 0.208 [0.167, 0.250] | 0.000 [0.000, 0.000] | 20001 [15816, 24951] |
-| budget | 131 | 0.898 [0.868, 0.923] | 0.914 [0.888, 0.935] | 0.715 [0.668, 0.762] | 0.211 [0.174, 0.250] | 0.000 [0.000, 0.000] | 20031 [15928, 25080] |
-| arc | 131 | 0.913 [0.886, 0.937] | 0.928 [0.905, 0.949] | 0.797 [0.764, 0.832] | 0.211 [0.169, 0.257] | 0.000 [0.000, 0.000] | 19916 [15716, 24837] |
-| innodb | 131 | 0.913 [0.886, 0.937] | 0.928 [0.905, 0.949] | 0.797 [0.764, 0.832] | 0.211 [0.169, 0.257] | 0.000 [0.000, 0.000] | 19916 [15716, 24837] |
-
-#### strict · bypass=on · budget=4000
+#### strict / bypass=off / budget=16000
 
 | policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| oracle | 131 | 0.793 [0.753, 0.826] | 0.849 [0.823, 0.872] | 0.706 [0.676, 0.738] | 0.709 [0.670, 0.748] | 0.000 [0.000, 0.000] | 14455 [12847, 16105] |
-| random | 131 | 0.631 [0.592, 0.667] | 0.711 [0.683, 0.738] | 0.721 [0.694, 0.749] | 0.673 [0.636, 0.707] | 0.000 [0.000, 0.000] | 14212 [12636, 15805] |
-| lru | 131 | 0.659 [0.618, 0.696] | 0.735 [0.703, 0.762] | 0.704 [0.674, 0.735] | 0.708 [0.669, 0.747] | 0.000 [0.000, 0.000] | 14451 [12847, 16093] |
-| clock | 131 | 0.655 [0.614, 0.691] | 0.733 [0.703, 0.759] | 0.701 [0.671, 0.731] | 0.689 [0.650, 0.729] | 0.000 [0.000, 0.000] | 14169 [12595, 15760] |
-| budget | 131 | 0.587 [0.547, 0.622] | 0.667 [0.639, 0.693] | 0.615 [0.575, 0.658] | 0.559 [0.517, 0.603] | 0.000 [0.000, 0.000] | 14138 [12583, 15720] |
-| arc | 131 | 0.659 [0.618, 0.696] | 0.735 [0.703, 0.762] | 0.704 [0.674, 0.735] | 0.708 [0.669, 0.747] | 0.000 [0.000, 0.000] | 14451 [12847, 16093] |
-| innodb | 131 | 0.659 [0.618, 0.696] | 0.735 [0.703, 0.762] | 0.704 [0.674, 0.735] | 0.708 [0.669, 0.747] | 0.000 [0.000, 0.000] | 14451 [12847, 16093] |
+| oracle | 131 | 0.919 [0.886, 0.945] | 0.950 [0.931, 0.966] | 0.724 [0.691, 0.757] | 0.431 [0.382, 0.480] | 0.000 [0.000, 0.000] | 30886.046 [26239.748, 36037.748] |
+| random | 131 | 0.794 [0.760, 0.827] | 0.835 [0.806, 0.862] | 0.722 [0.690, 0.753] | 0.456 [0.410, 0.501] | 0.000 [0.000, 0.000] | 30871.191 [26228.947, 35996.885] |
+| lru | 131 | 0.797 [0.759, 0.833] | 0.841 [0.809, 0.869] | 0.714 [0.680, 0.747] | 0.413 [0.367, 0.460] | 0.000 [0.000, 0.000] | 30831.931 [26198.466, 35893.679] |
+| clock | 131 | 0.803 [0.766, 0.840] | 0.846 [0.815, 0.874] | 0.698 [0.662, 0.734] | 0.404 [0.358, 0.449] | 0.000 [0.000, 0.000] | 30849.038 [26199.794, 35905.634] |
+| budget | 131 | 0.770 [0.732, 0.807] | 0.808 [0.777, 0.836] | 0.577 [0.531, 0.622] | 0.299 [0.262, 0.334] | 0.000 [0.000, 0.000] | 30493.351 [25925.107, 35569.962] |
+| arc | 131 | 0.795 [0.756, 0.830] | 0.839 [0.808, 0.868] | 0.715 [0.682, 0.749] | 0.417 [0.372, 0.464] | 0.000 [0.000, 0.000] | 30839.992 [26212.527, 35905.000] |
+| innodb | 131 | 0.794 [0.754, 0.828] | 0.838 [0.807, 0.867] | 0.717 [0.683, 0.750] | 0.422 [0.375, 0.471] | 0.000 [0.000, 0.000] | 30806.550 [26224.603, 35822.740] |
 
-#### strict · bypass=on · budget=8000
-
-| policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| oracle | 131 | 0.815 [0.778, 0.848] | 0.864 [0.840, 0.886] | 0.728 [0.692, 0.762] | 0.481 [0.428, 0.534] | 0.000 [0.000, 0.000] | 10755 [9229, 12318] |
-| random | 131 | 0.740 [0.703, 0.774] | 0.799 [0.772, 0.824] | 0.741 [0.711, 0.774] | 0.460 [0.418, 0.504] | 0.000 [0.000, 0.000] | 10801 [9311, 12257] |
-| lru | 131 | 0.749 [0.711, 0.781] | 0.807 [0.781, 0.830] | 0.726 [0.690, 0.760] | 0.480 [0.428, 0.533] | 0.000 [0.000, 0.000] | 10770 [9232, 12328] |
-| clock | 131 | 0.738 [0.702, 0.770] | 0.799 [0.773, 0.823] | 0.704 [0.666, 0.741] | 0.455 [0.404, 0.507] | 0.000 [0.000, 0.000] | 10841 [9283, 12358] |
-| budget | 131 | 0.707 [0.669, 0.742] | 0.768 [0.739, 0.794] | 0.597 [0.550, 0.645] | 0.356 [0.313, 0.400] | 0.000 [0.000, 0.000] | 10770 [9205, 12349] |
-| arc | 131 | 0.749 [0.711, 0.781] | 0.807 [0.781, 0.830] | 0.726 [0.690, 0.760] | 0.480 [0.428, 0.533] | 0.000 [0.000, 0.000] | 10770 [9232, 12328] |
-| innodb | 131 | 0.749 [0.711, 0.781] | 0.807 [0.781, 0.830] | 0.726 [0.690, 0.760] | 0.480 [0.428, 0.533] | 0.000 [0.000, 0.000] | 10770 [9232, 12328] |
-
-#### strict · bypass=on · budget=16000
+#### strict / bypass=off / budget=32000
 
 | policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| oracle | 131 | 0.824 [0.789, 0.854] | 0.869 [0.845, 0.889] | 0.850 [0.817, 0.882] | 0.197 [0.155, 0.239] | 0.000 [0.000, 0.000] | 5311 [4091, 6599] |
-| random | 131 | 0.802 [0.765, 0.833] | 0.851 [0.827, 0.873] | 0.851 [0.819, 0.882] | 0.186 [0.149, 0.223] | 0.000 [0.000, 0.000] | 5508 [4234, 6843] |
-| lru | 131 | 0.805 [0.770, 0.836] | 0.854 [0.831, 0.877] | 0.848 [0.816, 0.881] | 0.194 [0.154, 0.235] | 0.000 [0.000, 0.000] | 5300 [4087, 6571] |
-| clock | 131 | 0.802 [0.766, 0.833] | 0.852 [0.827, 0.874] | 0.845 [0.810, 0.879] | 0.193 [0.155, 0.233] | 0.000 [0.000, 0.000] | 5291 [4052, 6622] |
-| budget | 131 | 0.788 [0.753, 0.819] | 0.839 [0.813, 0.862] | 0.766 [0.718, 0.812] | 0.175 [0.140, 0.214] | 0.000 [0.000, 0.000] | 5212 [3986, 6520] |
-| arc | 131 | 0.805 [0.770, 0.836] | 0.854 [0.831, 0.877] | 0.848 [0.816, 0.881] | 0.194 [0.154, 0.235] | 0.000 [0.000, 0.000] | 5300 [4087, 6571] |
-| innodb | 131 | 0.805 [0.770, 0.836] | 0.854 [0.831, 0.877] | 0.848 [0.816, 0.881] | 0.194 [0.154, 0.235] | 0.000 [0.000, 0.000] | 5300 [4087, 6571] |
+| oracle | 131 | 0.983 [0.968, 0.993] | 0.990 [0.983, 0.996] | 0.810 [0.779, 0.845] | 0.233 [0.186, 0.283] | 0.000 [0.000, 0.000] | 20182.840 [15808.008, 25073.084] |
+| random | 131 | 0.917 [0.892, 0.937] | 0.934 [0.914, 0.950] | 0.817 [0.782, 0.850] | 0.234 [0.192, 0.275] | 0.000 [0.000, 0.000] | 19738.000 [15629.885, 24862.740] |
+| lru | 131 | 0.913 [0.886, 0.937] | 0.928 [0.905, 0.949] | 0.797 [0.764, 0.832] | 0.211 [0.169, 0.257] | 0.000 [0.000, 0.000] | 19916.756 [15716.183, 24837.672] |
+| clock | 131 | 0.919 [0.895, 0.941] | 0.933 [0.910, 0.953] | 0.806 [0.775, 0.840] | 0.208 [0.167, 0.250] | 0.000 [0.000, 0.000] | 20001.099 [15816.580, 24951.779] |
+| budget | 131 | 0.898 [0.868, 0.923] | 0.914 [0.888, 0.935] | 0.716 [0.668, 0.762] | 0.211 [0.174, 0.250] | 0.000 [0.000, 0.000] | 20031.122 [15928.237, 25079.618] |
+| arc | 131 | 0.912 [0.884, 0.936] | 0.927 [0.903, 0.948] | 0.796 [0.764, 0.832] | 0.211 [0.169, 0.257] | 0.000 [0.000, 0.000] | 19857.511 [15704.290, 24719.542] |
+| innodb | 131 | 0.912 [0.885, 0.936] | 0.927 [0.903, 0.948] | 0.797 [0.765, 0.832] | 0.215 [0.173, 0.260] | 0.000 [0.000, 0.000] | 19876.931 [15722.527, 24741.328] |
 
-#### strict · bypass=on · budget=32000
+#### strict / bypass=on / budget=4000
 
 | policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| oracle | 131 | 0.824 [0.789, 0.854] | 0.869 [0.845, 0.889] | 0.979 [0.963, 0.992] | 0.024 [0.010, 0.040] | 0.000 [0.000, 0.000] | 1030 [483, 1685] |
-| random | 131 | 0.821 [0.788, 0.852] | 0.867 [0.843, 0.887] | 0.972 [0.956, 0.985] | 0.029 [0.014, 0.048] | 0.000 [0.000, 0.000] | 1019 [466, 1671] |
-| lru | 131 | 0.822 [0.788, 0.853] | 0.867 [0.844, 0.888] | 0.979 [0.963, 0.992] | 0.024 [0.010, 0.040] | 0.000 [0.000, 0.000] | 1030 [483, 1685] |
-| clock | 131 | 0.822 [0.788, 0.852] | 0.867 [0.844, 0.888] | 0.976 [0.958, 0.990] | 0.023 [0.010, 0.038] | 0.000 [0.000, 0.000] | 1013 [472, 1654] |
-| budget | 131 | 0.821 [0.787, 0.851] | 0.866 [0.843, 0.887] | 0.963 [0.941, 0.981] | 0.038 [0.018, 0.062] | 0.000 [0.000, 0.000] | 982 [440, 1627] |
-| arc | 131 | 0.822 [0.788, 0.853] | 0.867 [0.844, 0.888] | 0.979 [0.963, 0.992] | 0.024 [0.010, 0.040] | 0.000 [0.000, 0.000] | 1030 [483, 1685] |
-| innodb | 131 | 0.822 [0.788, 0.853] | 0.867 [0.844, 0.888] | 0.979 [0.963, 0.992] | 0.024 [0.010, 0.040] | 0.000 [0.000, 0.000] | 1030 [483, 1685] |
+| oracle | 131 | 0.793 [0.753, 0.826] | 0.849 [0.823, 0.872] | 0.706 [0.676, 0.738] | 0.709 [0.670, 0.748] | 0.000 [0.000, 0.000] | 14455.122 [12847.588, 16105.977] |
+| random | 131 | 0.631 [0.592, 0.667] | 0.711 [0.683, 0.738] | 0.721 [0.694, 0.749] | 0.673 [0.636, 0.707] | 0.000 [0.000, 0.000] | 14212.405 [12636.878, 15805.099] |
+| lru | 131 | 0.659 [0.618, 0.696] | 0.735 [0.703, 0.762] | 0.704 [0.674, 0.735] | 0.708 [0.669, 0.747] | 0.000 [0.000, 0.000] | 14451.588 [12847.351, 16093.634] |
+| clock | 131 | 0.655 [0.614, 0.691] | 0.733 [0.703, 0.759] | 0.701 [0.671, 0.731] | 0.689 [0.650, 0.729] | 0.000 [0.000, 0.000] | 14169.565 [12595.069, 15760.099] |
+| budget | 131 | 0.589 [0.549, 0.624] | 0.670 [0.640, 0.696] | 0.615 [0.575, 0.658] | 0.559 [0.518, 0.603] | 0.000 [0.000, 0.000] | 14126.718 [12576.336, 15707.733] |
+| arc | 131 | 0.659 [0.618, 0.696] | 0.735 [0.703, 0.762] | 0.704 [0.674, 0.735] | 0.708 [0.669, 0.747] | 0.000 [0.000, 0.000] | 14438.588 [12835.221, 16081.779] |
+| innodb | 131 | 0.659 [0.619, 0.696] | 0.736 [0.704, 0.762] | 0.704 [0.674, 0.735] | 0.708 [0.668, 0.746] | 0.000 [0.000, 0.000] | 14392.641 [12825.115, 15998.069] |
+
+#### strict / bypass=on / budget=8000
+
+| policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| oracle | 131 | 0.815 [0.778, 0.848] | 0.864 [0.840, 0.886] | 0.728 [0.692, 0.762] | 0.481 [0.428, 0.534] | 0.000 [0.000, 0.000] | 10755.107 [9229.496, 12318.511] |
+| random | 131 | 0.740 [0.703, 0.774] | 0.799 [0.772, 0.824] | 0.741 [0.711, 0.774] | 0.460 [0.418, 0.504] | 0.000 [0.000, 0.000] | 10801.702 [9311.290, 12257.168] |
+| lru | 131 | 0.749 [0.711, 0.781] | 0.807 [0.781, 0.830] | 0.726 [0.690, 0.760] | 0.480 [0.428, 0.533] | 0.000 [0.000, 0.000] | 10770.176 [9232.962, 12328.420] |
+| clock | 131 | 0.738 [0.702, 0.770] | 0.799 [0.773, 0.823] | 0.704 [0.666, 0.741] | 0.455 [0.404, 0.507] | 0.000 [0.000, 0.000] | 10841.489 [9283.282, 12358.939] |
+| budget | 131 | 0.707 [0.668, 0.742] | 0.768 [0.739, 0.794] | 0.597 [0.551, 0.646] | 0.357 [0.313, 0.401] | 0.000 [0.000, 0.000] | 10763.405 [9191.473, 12332.969] |
+| arc | 131 | 0.749 [0.711, 0.782] | 0.807 [0.781, 0.830] | 0.726 [0.690, 0.760] | 0.479 [0.428, 0.532] | 0.000 [0.000, 0.000] | 10791.153 [9232.038, 12379.183] |
+| innodb | 131 | 0.749 [0.711, 0.782] | 0.807 [0.781, 0.830] | 0.726 [0.690, 0.760] | 0.479 [0.427, 0.531] | 0.000 [0.000, 0.000] | 10760.260 [9234.802, 12319.191] |
+
+#### strict / bypass=on / budget=16000
+
+| policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| oracle | 131 | 0.824 [0.789, 0.854] | 0.869 [0.845, 0.889] | 0.850 [0.817, 0.882] | 0.197 [0.155, 0.239] | 0.000 [0.000, 0.000] | 5311.496 [4091.145, 6599.053] |
+| random | 131 | 0.802 [0.765, 0.833] | 0.851 [0.827, 0.873] | 0.851 [0.819, 0.882] | 0.186 [0.149, 0.223] | 0.000 [0.000, 0.000] | 5508.962 [4234.511, 6843.519] |
+| lru | 131 | 0.805 [0.770, 0.836] | 0.854 [0.831, 0.877] | 0.848 [0.816, 0.881] | 0.194 [0.154, 0.235] | 0.000 [0.000, 0.000] | 5300.458 [4087.573, 6571.756] |
+| clock | 131 | 0.802 [0.766, 0.833] | 0.852 [0.827, 0.874] | 0.845 [0.810, 0.879] | 0.193 [0.155, 0.233] | 0.000 [0.000, 0.000] | 5291.740 [4052.580, 6622.550] |
+| budget | 131 | 0.788 [0.753, 0.819] | 0.839 [0.813, 0.862] | 0.765 [0.718, 0.812] | 0.175 [0.140, 0.213] | 0.000 [0.000, 0.000] | 5213.015 [3985.084, 6521.702] |
+| arc | 131 | 0.805 [0.770, 0.836] | 0.854 [0.831, 0.877] | 0.848 [0.816, 0.881] | 0.194 [0.154, 0.235] | 0.000 [0.000, 0.000] | 5319.634 [4087.573, 6590.931] |
+| innodb | 131 | 0.805 [0.770, 0.836] | 0.854 [0.831, 0.877] | 0.848 [0.816, 0.881] | 0.194 [0.154, 0.235] | 0.000 [0.000, 0.000] | 5319.634 [4087.573, 6590.931] |
+
+#### strict / bypass=on / budget=32000
+
+| policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| oracle | 131 | 0.824 [0.789, 0.854] | 0.869 [0.845, 0.889] | 0.979 [0.963, 0.992] | 0.024 [0.010, 0.040] | 0.000 [0.000, 0.000] | 1030.252 [483.053, 1685.710] |
+| random | 131 | 0.821 [0.788, 0.852] | 0.867 [0.843, 0.887] | 0.972 [0.956, 0.985] | 0.029 [0.014, 0.048] | 0.000 [0.000, 0.000] | 1019.656 [466.626, 1671.130] |
+| lru | 131 | 0.822 [0.788, 0.853] | 0.867 [0.844, 0.888] | 0.979 [0.963, 0.992] | 0.024 [0.010, 0.040] | 0.000 [0.000, 0.000] | 1030.252 [483.053, 1685.710] |
+| clock | 131 | 0.822 [0.788, 0.852] | 0.867 [0.844, 0.888] | 0.976 [0.958, 0.990] | 0.023 [0.010, 0.038] | 0.000 [0.000, 0.000] | 1013.099 [472.634, 1654.099] |
+| budget | 131 | 0.821 [0.787, 0.851] | 0.866 [0.843, 0.887] | 0.963 [0.941, 0.981] | 0.038 [0.018, 0.062] | 0.000 [0.000, 0.000] | 982.626 [440.008, 1627.527] |
+| arc | 131 | 0.822 [0.788, 0.853] | 0.867 [0.844, 0.888] | 0.979 [0.963, 0.992] | 0.024 [0.010, 0.040] | 0.000 [0.000, 0.000] | 1030.252 [483.053, 1685.710] |
+| innodb | 131 | 0.822 [0.788, 0.853] | 0.867 [0.844, 0.888] | 0.979 [0.963, 0.992] | 0.024 [0.010, 0.040] | 0.000 [0.000, 0.000] | 1030.252 [483.053, 1685.710] |
 
 ### Lenient reference mode
 
-#### lenient · bypass=off · budget=4000
+#### lenient / bypass=off / budget=4000
 
 | policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| oracle | 131 | 0.809 [0.779, 0.834] | 0.839 [0.815, 0.860] | 0.297 [0.283, 0.311] | 0.732 [0.693, 0.773] | 0.000 [0.000, 0.000] | 40499 [35810, 45636] |
-| random | 131 | 0.690 [0.662, 0.715] | 0.725 [0.703, 0.744] | 0.300 [0.285, 0.314] | 0.682 [0.644, 0.718] | 0.000 [0.000, 0.000] | 40087 [35430, 45149] |
-| lru | 131 | 0.704 [0.674, 0.731] | 0.744 [0.720, 0.765] | 0.296 [0.282, 0.309] | 0.731 [0.692, 0.773] | 0.000 [0.000, 0.000] | 40512 [35836, 45647] |
-| clock | 131 | 0.702 [0.673, 0.727] | 0.741 [0.717, 0.761] | 0.292 [0.278, 0.306] | 0.715 [0.675, 0.756] | 0.000 [0.000, 0.000] | 40363 [35699, 45528] |
-| budget | 131 | 0.715 [0.688, 0.739] | 0.738 [0.714, 0.760] | 0.191 [0.176, 0.206] | 0.421 [0.383, 0.460] | 0.000 [0.000, 0.000] | 39956 [35239, 45106] |
-| arc | 131 | 0.704 [0.674, 0.731] | 0.744 [0.720, 0.765] | 0.296 [0.282, 0.309] | 0.731 [0.692, 0.773] | 0.000 [0.000, 0.000] | 40512 [35836, 45647] |
-| innodb | 131 | 0.704 [0.674, 0.731] | 0.744 [0.720, 0.765] | 0.296 [0.282, 0.309] | 0.731 [0.692, 0.773] | 0.000 [0.000, 0.000] | 40512 [35836, 45647] |
+| oracle | 131 | 0.809 [0.779, 0.834] | 0.839 [0.815, 0.860] | 0.297 [0.283, 0.311] | 0.732 [0.693, 0.773] | 0.000 [0.000, 0.000] | 40499.542 [35810.550, 45636.847] |
+| random | 131 | 0.690 [0.662, 0.715] | 0.725 [0.703, 0.744] | 0.300 [0.285, 0.314] | 0.682 [0.644, 0.718] | 0.000 [0.000, 0.000] | 40087.588 [35430.511, 45149.107] |
+| lru | 131 | 0.704 [0.674, 0.731] | 0.744 [0.720, 0.765] | 0.296 [0.282, 0.309] | 0.731 [0.692, 0.773] | 0.000 [0.000, 0.000] | 40512.008 [35836.725, 45647.046] |
+| clock | 131 | 0.702 [0.673, 0.727] | 0.741 [0.717, 0.761] | 0.292 [0.278, 0.306] | 0.715 [0.675, 0.756] | 0.000 [0.000, 0.000] | 40363.000 [35699.626, 45528.214] |
+| budget | 131 | 0.714 [0.688, 0.740] | 0.738 [0.715, 0.760] | 0.191 [0.176, 0.205] | 0.420 [0.383, 0.459] | 0.000 [0.000, 0.000] | 39956.534 [35236.679, 45102.473] |
+| arc | 131 | 0.704 [0.674, 0.731] | 0.744 [0.720, 0.765] | 0.296 [0.282, 0.309] | 0.731 [0.692, 0.772] | 0.000 [0.000, 0.000] | 40511.931 [35836.557, 45647.008] |
+| innodb | 131 | 0.699 [0.669, 0.726] | 0.739 [0.714, 0.761] | 0.296 [0.281, 0.309] | 0.730 [0.693, 0.772] | 0.000 [0.000, 0.000] | 40409.053 [35754.771, 45540.130] |
 
-#### lenient · bypass=off · budget=8000
-
-| policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| oracle | 131 | 0.885 [0.859, 0.906] | 0.907 [0.885, 0.924] | 0.273 [0.257, 0.288] | 0.557 [0.510, 0.603] | 0.000 [0.000, 0.000] | 36884 [32251, 41967] |
-| random | 131 | 0.783 [0.759, 0.809] | 0.811 [0.790, 0.833] | 0.288 [0.271, 0.305] | 0.538 [0.499, 0.576] | 0.000 [0.000, 0.000] | 36998 [32303, 42090] |
-| lru | 131 | 0.810 [0.784, 0.833] | 0.840 [0.818, 0.861] | 0.270 [0.254, 0.286] | 0.555 [0.507, 0.601] | 0.000 [0.000, 0.000] | 36901 [32240, 41989] |
-| clock | 131 | 0.803 [0.776, 0.828] | 0.834 [0.812, 0.854] | 0.261 [0.244, 0.278] | 0.531 [0.487, 0.578] | 0.000 [0.000, 0.000] | 36897 [32210, 42045] |
-| budget | 131 | 0.829 [0.804, 0.851] | 0.844 [0.823, 0.863] | 0.145 [0.129, 0.163] | 0.251 [0.219, 0.288] | 0.000 [0.000, 0.000] | 36710 [32107, 41827] |
-| arc | 131 | 0.810 [0.784, 0.833] | 0.840 [0.818, 0.861] | 0.270 [0.254, 0.286] | 0.555 [0.507, 0.601] | 0.000 [0.000, 0.000] | 36901 [32240, 41989] |
-| innodb | 131 | 0.810 [0.784, 0.833] | 0.840 [0.818, 0.861] | 0.270 [0.254, 0.286] | 0.555 [0.507, 0.601] | 0.000 [0.000, 0.000] | 36901 [32240, 41989] |
-
-#### lenient · bypass=off · budget=16000
+#### lenient / bypass=off / budget=8000
 
 | policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| oracle | 131 | 0.962 [0.948, 0.976] | 0.972 [0.961, 0.981] | 0.327 [0.286, 0.371] | 0.342 [0.300, 0.386] | 0.000 [0.000, 0.000] | 30768 [26153, 35833] |
-| random | 131 | 0.873 [0.853, 0.892] | 0.888 [0.869, 0.904] | 0.359 [0.318, 0.403] | 0.419 [0.373, 0.463] | 0.000 [0.000, 0.000] | 30871 [26228, 35996] |
-| lru | 131 | 0.908 [0.888, 0.925] | 0.928 [0.911, 0.941] | 0.326 [0.284, 0.370] | 0.338 [0.296, 0.381] | 0.000 [0.000, 0.000] | 30831 [26198, 35893] |
-| clock | 131 | 0.903 [0.882, 0.921] | 0.922 [0.906, 0.935] | 0.311 [0.267, 0.356] | 0.331 [0.289, 0.373] | 0.000 [0.000, 0.000] | 30849 [26199, 35905] |
-| budget | 131 | 0.900 [0.881, 0.918] | 0.910 [0.893, 0.924] | 0.203 [0.154, 0.256] | 0.135 [0.115, 0.156] | 0.000 [0.000, 0.000] | 30492 [25905, 35582] |
-| arc | 131 | 0.908 [0.888, 0.925] | 0.928 [0.911, 0.941] | 0.326 [0.284, 0.370] | 0.338 [0.296, 0.381] | 0.000 [0.000, 0.000] | 30831 [26198, 35893] |
-| innodb | 131 | 0.908 [0.888, 0.925] | 0.928 [0.911, 0.941] | 0.326 [0.284, 0.370] | 0.338 [0.296, 0.381] | 0.000 [0.000, 0.000] | 30831 [26198, 35893] |
+| oracle | 131 | 0.885 [0.859, 0.906] | 0.907 [0.885, 0.924] | 0.273 [0.257, 0.288] | 0.557 [0.510, 0.603] | 0.000 [0.000, 0.000] | 36884.634 [32251.924, 41967.489] |
+| random | 131 | 0.783 [0.759, 0.809] | 0.811 [0.790, 0.833] | 0.288 [0.271, 0.305] | 0.538 [0.499, 0.576] | 0.000 [0.000, 0.000] | 36998.466 [32303.908, 42090.939] |
+| lru | 131 | 0.810 [0.784, 0.833] | 0.840 [0.818, 0.861] | 0.270 [0.254, 0.286] | 0.555 [0.507, 0.601] | 0.000 [0.000, 0.000] | 36901.359 [32240.252, 41989.069] |
+| clock | 131 | 0.803 [0.776, 0.828] | 0.834 [0.812, 0.854] | 0.261 [0.244, 0.278] | 0.531 [0.487, 0.578] | 0.000 [0.000, 0.000] | 36897.351 [32210.214, 42045.511] |
+| budget | 131 | 0.828 [0.804, 0.851] | 0.844 [0.822, 0.863] | 0.145 [0.129, 0.163] | 0.251 [0.219, 0.288] | 0.000 [0.000, 0.000] | 36707.115 [32103.359, 41827.702] |
+| arc | 131 | 0.809 [0.783, 0.833] | 0.839 [0.817, 0.860] | 0.271 [0.254, 0.287] | 0.559 [0.511, 0.606] | 0.000 [0.000, 0.000] | 36869.626 [32218.008, 41970.878] |
+| innodb | 131 | 0.805 [0.776, 0.830] | 0.835 [0.811, 0.856] | 0.271 [0.254, 0.287] | 0.564 [0.515, 0.610] | 0.000 [0.000, 0.000] | 36834.206 [32179.702, 41871.473] |
 
-#### lenient · bypass=off · budget=32000
-
-| policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| oracle | 131 | 1.000 [1.000, 1.000] | 1.000 [1.000, 1.000] | 0.478 [0.412, 0.548] | 0.174 [0.138, 0.215] | 0.000 [0.000, 0.000] | 19896 [15675, 24873] |
-| random | 131 | 0.946 [0.930, 0.961] | 0.952 [0.938, 0.964] | 0.533 [0.472, 0.597] | 0.218 [0.178, 0.256] | 0.000 [0.000, 0.000] | 19738 [15629, 24862] |
-| lru | 131 | 0.964 [0.951, 0.975] | 0.972 [0.962, 0.981] | 0.476 [0.410, 0.546] | 0.170 [0.134, 0.208] | 0.000 [0.000, 0.000] | 19916 [15716, 24837] |
-| clock | 131 | 0.965 [0.952, 0.976] | 0.973 [0.963, 0.982] | 0.476 [0.408, 0.545] | 0.163 [0.129, 0.197] | 0.000 [0.000, 0.000] | 20001 [15816, 24951] |
-| budget | 131 | 0.962 [0.950, 0.972] | 0.965 [0.954, 0.974] | 0.410 [0.337, 0.487] | 0.083 [0.066, 0.102] | 0.000 [0.000, 0.000] | 20031 [15928, 25080] |
-| arc | 131 | 0.964 [0.951, 0.975] | 0.972 [0.962, 0.981] | 0.476 [0.410, 0.546] | 0.170 [0.134, 0.208] | 0.000 [0.000, 0.000] | 19916 [15716, 24837] |
-| innodb | 131 | 0.964 [0.951, 0.975] | 0.972 [0.962, 0.981] | 0.476 [0.410, 0.546] | 0.170 [0.134, 0.208] | 0.000 [0.000, 0.000] | 19916 [15716, 24837] |
-
-#### lenient · bypass=on · budget=4000
+#### lenient / bypass=off / budget=16000
 
 | policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| oracle | 131 | 0.854 [0.832, 0.874] | 0.866 [0.847, 0.884] | 0.306 [0.292, 0.320] | 0.664 [0.624, 0.705] | 0.000 [0.000, 0.000] | 14445 [12858, 16091] |
-| random | 131 | 0.720 [0.695, 0.743] | 0.743 [0.724, 0.763] | 0.321 [0.308, 0.336] | 0.642 [0.603, 0.677] | 0.000 [0.000, 0.000] | 14212 [12636, 15805] |
-| lru | 131 | 0.758 [0.733, 0.782] | 0.785 [0.764, 0.804] | 0.304 [0.291, 0.318] | 0.659 [0.618, 0.701] | 0.000 [0.000, 0.000] | 14451 [12847, 16093] |
-| clock | 131 | 0.754 [0.729, 0.777] | 0.779 [0.758, 0.799] | 0.299 [0.286, 0.311] | 0.632 [0.593, 0.673] | 0.000 [0.000, 0.000] | 14169 [12595, 15760] |
-| budget | 131 | 0.726 [0.702, 0.749] | 0.744 [0.724, 0.764] | 0.201 [0.184, 0.217] | 0.404 [0.366, 0.445] | 0.000 [0.000, 0.000] | 14131 [12581, 15716] |
-| arc | 131 | 0.758 [0.733, 0.782] | 0.785 [0.764, 0.804] | 0.304 [0.291, 0.318] | 0.659 [0.618, 0.701] | 0.000 [0.000, 0.000] | 14451 [12847, 16093] |
-| innodb | 131 | 0.758 [0.733, 0.782] | 0.785 [0.764, 0.804] | 0.304 [0.291, 0.318] | 0.659 [0.618, 0.701] | 0.000 [0.000, 0.000] | 14451 [12847, 16093] |
+| oracle | 131 | 0.962 [0.948, 0.976] | 0.972 [0.961, 0.981] | 0.327 [0.286, 0.371] | 0.342 [0.300, 0.386] | 0.000 [0.000, 0.000] | 30768.656 [26153.641, 35833.206] |
+| random | 131 | 0.873 [0.853, 0.892] | 0.888 [0.869, 0.904] | 0.359 [0.318, 0.403] | 0.419 [0.373, 0.463] | 0.000 [0.000, 0.000] | 30871.191 [26228.947, 35996.885] |
+| lru | 131 | 0.908 [0.888, 0.925] | 0.928 [0.911, 0.941] | 0.326 [0.284, 0.370] | 0.338 [0.296, 0.381] | 0.000 [0.000, 0.000] | 30831.931 [26198.466, 35893.679] |
+| clock | 131 | 0.903 [0.882, 0.921] | 0.922 [0.906, 0.935] | 0.311 [0.267, 0.356] | 0.331 [0.289, 0.373] | 0.000 [0.000, 0.000] | 30849.038 [26199.794, 35905.634] |
+| budget | 131 | 0.900 [0.881, 0.918] | 0.909 [0.893, 0.924] | 0.203 [0.154, 0.255] | 0.135 [0.115, 0.157] | 0.000 [0.000, 0.000] | 30503.870 [25930.359, 35584.275] |
+| arc | 131 | 0.906 [0.886, 0.923] | 0.926 [0.909, 0.940] | 0.327 [0.285, 0.372] | 0.343 [0.300, 0.386] | 0.000 [0.000, 0.000] | 30839.992 [26212.527, 35905.000] |
+| innodb | 131 | 0.905 [0.885, 0.923] | 0.925 [0.908, 0.939] | 0.328 [0.286, 0.373] | 0.349 [0.305, 0.394] | 0.000 [0.000, 0.000] | 30806.550 [26224.603, 35822.740] |
 
-#### lenient · bypass=on · budget=8000
-
-| policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| oracle | 131 | 0.887 [0.869, 0.904] | 0.891 [0.874, 0.907] | 0.305 [0.271, 0.342] | 0.421 [0.373, 0.473] | 0.000 [0.000, 0.000] | 10755 [9220, 12324] |
-| random | 131 | 0.811 [0.790, 0.831] | 0.826 [0.807, 0.843] | 0.336 [0.302, 0.374] | 0.423 [0.380, 0.467] | 0.000 [0.000, 0.000] | 10801 [9311, 12257] |
-| lru | 131 | 0.836 [0.814, 0.856] | 0.848 [0.830, 0.865] | 0.304 [0.271, 0.342] | 0.421 [0.373, 0.473] | 0.000 [0.000, 0.000] | 10770 [9232, 12328] |
-| clock | 131 | 0.831 [0.809, 0.851] | 0.843 [0.824, 0.860] | 0.283 [0.246, 0.323] | 0.398 [0.348, 0.447] | 0.000 [0.000, 0.000] | 10841 [9283, 12358] |
-| budget | 131 | 0.819 [0.799, 0.839] | 0.828 [0.811, 0.845] | 0.216 [0.177, 0.258] | 0.223 [0.192, 0.259] | 0.000 [0.000, 0.000] | 10782 [9203, 12357] |
-| arc | 131 | 0.836 [0.814, 0.856] | 0.848 [0.830, 0.865] | 0.304 [0.271, 0.342] | 0.421 [0.373, 0.473] | 0.000 [0.000, 0.000] | 10770 [9232, 12328] |
-| innodb | 131 | 0.836 [0.814, 0.856] | 0.848 [0.830, 0.865] | 0.304 [0.271, 0.342] | 0.421 [0.373, 0.473] | 0.000 [0.000, 0.000] | 10770 [9232, 12328] |
-
-#### lenient · bypass=on · budget=16000
+#### lenient / bypass=off / budget=32000
 
 | policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| oracle | 131 | 0.890 [0.872, 0.906] | 0.893 [0.876, 0.908] | 0.551 [0.481, 0.617] | 0.156 [0.123, 0.191] | 0.000 [0.000, 0.000] | 5299 [4087, 6570] |
-| random | 131 | 0.869 [0.850, 0.886] | 0.873 [0.856, 0.888] | 0.593 [0.531, 0.651] | 0.179 [0.144, 0.215] | 0.000 [0.000, 0.000] | 5508 [4234, 6843] |
-| lru | 131 | 0.880 [0.861, 0.897] | 0.885 [0.869, 0.900] | 0.551 [0.481, 0.617] | 0.156 [0.123, 0.191] | 0.000 [0.000, 0.000] | 5300 [4087, 6571] |
-| clock | 131 | 0.879 [0.860, 0.895] | 0.884 [0.867, 0.898] | 0.543 [0.474, 0.612] | 0.157 [0.124, 0.193] | 0.000 [0.000, 0.000] | 5291 [4052, 6622] |
-| budget | 131 | 0.873 [0.853, 0.890] | 0.877 [0.860, 0.892] | 0.496 [0.423, 0.568] | 0.080 [0.064, 0.099] | 0.000 [0.000, 0.000] | 5202 [3986, 6520] |
-| arc | 131 | 0.880 [0.861, 0.897] | 0.885 [0.869, 0.900] | 0.551 [0.481, 0.617] | 0.156 [0.123, 0.191] | 0.000 [0.000, 0.000] | 5300 [4087, 6571] |
-| innodb | 131 | 0.880 [0.861, 0.897] | 0.885 [0.869, 0.900] | 0.551 [0.481, 0.617] | 0.156 [0.123, 0.191] | 0.000 [0.000, 0.000] | 5300 [4087, 6571] |
+| oracle | 131 | 1.000 [1.000, 1.000] | 1.000 [1.000, 1.000] | 0.478 [0.412, 0.548] | 0.174 [0.138, 0.215] | 0.000 [0.000, 0.000] | 19896.763 [15675.252, 24873.115] |
+| random | 131 | 0.946 [0.930, 0.961] | 0.952 [0.938, 0.964] | 0.533 [0.472, 0.597] | 0.218 [0.178, 0.256] | 0.000 [0.000, 0.000] | 19738.000 [15629.885, 24862.740] |
+| lru | 131 | 0.964 [0.951, 0.975] | 0.972 [0.962, 0.981] | 0.476 [0.410, 0.546] | 0.170 [0.134, 0.208] | 0.000 [0.000, 0.000] | 19916.756 [15716.183, 24837.672] |
+| clock | 131 | 0.965 [0.952, 0.976] | 0.973 [0.963, 0.982] | 0.476 [0.408, 0.545] | 0.163 [0.129, 0.197] | 0.000 [0.000, 0.000] | 20001.099 [15816.580, 24951.779] |
+| budget | 131 | 0.962 [0.950, 0.972] | 0.965 [0.954, 0.974] | 0.410 [0.337, 0.487] | 0.083 [0.066, 0.102] | 0.000 [0.000, 0.000] | 20028.198 [15925.313, 25076.695] |
+| arc | 131 | 0.964 [0.950, 0.975] | 0.972 [0.961, 0.980] | 0.476 [0.410, 0.546] | 0.170 [0.134, 0.209] | 0.000 [0.000, 0.000] | 19857.511 [15704.290, 24719.542] |
+| innodb | 131 | 0.963 [0.950, 0.975] | 0.971 [0.959, 0.980] | 0.477 [0.411, 0.547] | 0.175 [0.139, 0.216] | 0.000 [0.000, 0.000] | 19876.931 [15722.527, 24741.328] |
 
-#### lenient · bypass=on · budget=32000
+#### lenient / bypass=on / budget=4000
 
 | policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| oracle | 131 | 0.890 [0.872, 0.906] | 0.893 [0.876, 0.908] | 0.897 [0.849, 0.940] | 0.020 [0.008, 0.034] | 0.000 [0.000, 0.000] | 1030 [483, 1685] |
-| random | 131 | 0.888 [0.870, 0.904] | 0.891 [0.875, 0.906] | 0.904 [0.859, 0.945] | 0.025 [0.010, 0.043] | 0.000 [0.000, 0.000] | 1019 [466, 1671] |
-| lru | 131 | 0.889 [0.871, 0.905] | 0.892 [0.875, 0.907] | 0.897 [0.849, 0.940] | 0.020 [0.008, 0.034] | 0.000 [0.000, 0.000] | 1030 [483, 1685] |
-| clock | 131 | 0.889 [0.871, 0.905] | 0.892 [0.875, 0.907] | 0.897 [0.849, 0.940] | 0.018 [0.007, 0.030] | 0.000 [0.000, 0.000] | 1013 [472, 1654] |
-| budget | 131 | 0.888 [0.870, 0.905] | 0.891 [0.875, 0.906] | 0.898 [0.850, 0.943] | 0.013 [0.007, 0.021] | 0.000 [0.000, 0.000] | 982 [440, 1627] |
-| arc | 131 | 0.889 [0.871, 0.905] | 0.892 [0.875, 0.907] | 0.897 [0.849, 0.940] | 0.020 [0.008, 0.034] | 0.000 [0.000, 0.000] | 1030 [483, 1685] |
-| innodb | 131 | 0.889 [0.871, 0.905] | 0.892 [0.875, 0.907] | 0.897 [0.849, 0.940] | 0.020 [0.008, 0.034] | 0.000 [0.000, 0.000] | 1030 [483, 1685] |
+| oracle | 131 | 0.854 [0.832, 0.874] | 0.866 [0.847, 0.884] | 0.306 [0.292, 0.320] | 0.664 [0.624, 0.705] | 0.000 [0.000, 0.000] | 14445.221 [12858.382, 16091.748] |
+| random | 131 | 0.720 [0.695, 0.743] | 0.743 [0.724, 0.763] | 0.321 [0.308, 0.336] | 0.642 [0.603, 0.677] | 0.000 [0.000, 0.000] | 14212.405 [12636.878, 15805.099] |
+| lru | 131 | 0.758 [0.733, 0.782] | 0.785 [0.764, 0.804] | 0.304 [0.291, 0.318] | 0.659 [0.618, 0.701] | 0.000 [0.000, 0.000] | 14451.588 [12847.351, 16093.634] |
+| clock | 131 | 0.754 [0.729, 0.777] | 0.779 [0.758, 0.799] | 0.299 [0.286, 0.311] | 0.632 [0.593, 0.673] | 0.000 [0.000, 0.000] | 14169.565 [12595.069, 15760.099] |
+| budget | 131 | 0.726 [0.701, 0.749] | 0.745 [0.725, 0.765] | 0.202 [0.185, 0.218] | 0.405 [0.367, 0.446] | 0.000 [0.000, 0.000] | 14141.931 [12588.870, 15723.160] |
+| arc | 131 | 0.758 [0.733, 0.782] | 0.785 [0.764, 0.804] | 0.304 [0.291, 0.318] | 0.657 [0.617, 0.700] | 0.000 [0.000, 0.000] | 14438.588 [12835.221, 16081.779] |
+| innodb | 131 | 0.758 [0.732, 0.781] | 0.784 [0.763, 0.804] | 0.304 [0.291, 0.317] | 0.656 [0.617, 0.698] | 0.000 [0.000, 0.000] | 14392.641 [12825.115, 15998.069] |
 
-## Next
+#### lenient / bypass=on / budget=8000
 
-Task 14 documents the LRU=ARC=InnoDB mechanism and picks one of the
-three options (publish the degeneracy, fix the signal, drop the
-policies) before any Phase B policy work starts. The T14 outcome is
-what turns this document from a baseline table into a paper claim.
+| policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| oracle | 131 | 0.887 [0.869, 0.904] | 0.891 [0.874, 0.907] | 0.305 [0.271, 0.342] | 0.421 [0.373, 0.473] | 0.000 [0.000, 0.000] | 10755.649 [9220.969, 12324.756] |
+| random | 131 | 0.811 [0.790, 0.831] | 0.826 [0.807, 0.843] | 0.336 [0.302, 0.374] | 0.423 [0.380, 0.467] | 0.000 [0.000, 0.000] | 10801.702 [9311.290, 12257.168] |
+| lru | 131 | 0.836 [0.814, 0.856] | 0.848 [0.830, 0.865] | 0.304 [0.271, 0.342] | 0.421 [0.373, 0.473] | 0.000 [0.000, 0.000] | 10770.176 [9232.962, 12328.420] |
+| clock | 131 | 0.831 [0.809, 0.851] | 0.843 [0.824, 0.860] | 0.283 [0.246, 0.323] | 0.398 [0.348, 0.447] | 0.000 [0.000, 0.000] | 10841.489 [9283.282, 12358.939] |
+| budget | 131 | 0.820 [0.799, 0.839] | 0.829 [0.811, 0.846] | 0.217 [0.178, 0.259] | 0.225 [0.194, 0.262] | 0.000 [0.000, 0.000] | 10781.160 [9203.908, 12356.290] |
+| arc | 131 | 0.836 [0.814, 0.856] | 0.848 [0.830, 0.865] | 0.304 [0.271, 0.342] | 0.421 [0.373, 0.473] | 0.000 [0.000, 0.000] | 10791.153 [9232.038, 12379.183] |
+| innodb | 131 | 0.836 [0.814, 0.856] | 0.848 [0.830, 0.865] | 0.304 [0.271, 0.342] | 0.421 [0.373, 0.473] | 0.000 [0.000, 0.000] | 10760.260 [9234.802, 12319.191] |
+
+#### lenient / bypass=on / budget=16000
+
+| policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| oracle | 131 | 0.890 [0.872, 0.906] | 0.893 [0.876, 0.908] | 0.551 [0.481, 0.617] | 0.156 [0.123, 0.191] | 0.000 [0.000, 0.000] | 5299.969 [4087.359, 6570.229] |
+| random | 131 | 0.869 [0.850, 0.886] | 0.873 [0.856, 0.888] | 0.593 [0.531, 0.651] | 0.179 [0.144, 0.215] | 0.000 [0.000, 0.000] | 5508.962 [4234.511, 6843.519] |
+| lru | 131 | 0.880 [0.861, 0.897] | 0.885 [0.869, 0.900] | 0.551 [0.481, 0.617] | 0.156 [0.123, 0.191] | 0.000 [0.000, 0.000] | 5300.458 [4087.573, 6571.756] |
+| clock | 131 | 0.879 [0.860, 0.895] | 0.884 [0.867, 0.898] | 0.543 [0.474, 0.612] | 0.157 [0.124, 0.193] | 0.000 [0.000, 0.000] | 5291.740 [4052.580, 6622.550] |
+| budget | 131 | 0.873 [0.853, 0.890] | 0.877 [0.860, 0.892] | 0.496 [0.423, 0.568] | 0.081 [0.064, 0.100] | 0.000 [0.000, 0.000] | 5212.901 [3984.969, 6521.473] |
+| arc | 131 | 0.880 [0.861, 0.897] | 0.885 [0.869, 0.900] | 0.551 [0.481, 0.617] | 0.157 [0.123, 0.194] | 0.000 [0.000, 0.000] | 5319.634 [4087.573, 6590.931] |
+| innodb | 131 | 0.880 [0.861, 0.897] | 0.885 [0.869, 0.900] | 0.551 [0.481, 0.617] | 0.157 [0.123, 0.194] | 0.000 [0.000, 0.000] | 5319.634 [4087.573, 6590.931] |
+
+#### lenient / bypass=on / budget=32000
+
+| policy | n | retention | retention@10 | evict. precision | evict. recall | churn | tokens evicted |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| oracle | 131 | 0.890 [0.872, 0.906] | 0.893 [0.876, 0.908] | 0.897 [0.849, 0.940] | 0.020 [0.008, 0.034] | 0.000 [0.000, 0.000] | 1030.252 [483.053, 1685.710] |
+| random | 131 | 0.888 [0.870, 0.904] | 0.891 [0.875, 0.906] | 0.904 [0.859, 0.945] | 0.025 [0.010, 0.043] | 0.000 [0.000, 0.000] | 1019.656 [466.626, 1671.130] |
+| lru | 131 | 0.889 [0.871, 0.905] | 0.892 [0.875, 0.907] | 0.897 [0.849, 0.940] | 0.020 [0.008, 0.034] | 0.000 [0.000, 0.000] | 1030.252 [483.053, 1685.710] |
+| clock | 131 | 0.889 [0.871, 0.905] | 0.892 [0.875, 0.907] | 0.897 [0.849, 0.940] | 0.018 [0.007, 0.030] | 0.000 [0.000, 0.000] | 1013.099 [472.634, 1654.099] |
+| budget | 131 | 0.888 [0.870, 0.905] | 0.891 [0.875, 0.906] | 0.898 [0.850, 0.943] | 0.013 [0.007, 0.021] | 0.000 [0.000, 0.000] | 982.626 [440.008, 1627.527] |
+| arc | 131 | 0.889 [0.871, 0.905] | 0.892 [0.875, 0.907] | 0.897 [0.849, 0.940] | 0.020 [0.008, 0.034] | 0.000 [0.000, 0.000] | 1030.252 [483.053, 1685.710] |
+| innodb | 131 | 0.889 [0.871, 0.905] | 0.892 [0.875, 0.907] | 0.897 [0.849, 0.940] | 0.020 [0.008, 0.034] | 0.000 [0.000, 0.000] | 1030.252 [483.053, 1685.710] |
+
