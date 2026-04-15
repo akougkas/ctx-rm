@@ -396,6 +396,75 @@ class TestAmbientTokenFilter:
         assert any(e.kind == ReferenceEdgeKind.EXACT_QUOTE for e in g.edges)
 
 
+class TestFileDiscoveryEdge:
+    def test_listing_to_read_creates_discovery_edge(self) -> None:
+        listing = (
+            "Found 3 files:\n"
+            "/awoc/src/ctx_rm/core/bus.py\n"
+            "/awoc/src/ctx_rm/core/segment.py\n"
+            "/awoc/src/ctx_rm/core/graveyard.py\n"
+        )
+        segs = [
+            _seg(
+                "tu_bash",
+                0,
+                0,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Bash\ncommand=find /awoc -name '*.py'",
+                tool_name="Bash",
+                tool_use_id="b1",
+            ),
+            _seg(
+                "tr_bash",
+                0,
+                1,
+                TraceSegmentKind.TOOL_RESULT,
+                listing,
+                tool_use_id="b1",
+            ),
+            _seg(
+                "tu_read",
+                2,
+                2,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Read file_path=/awoc/src/ctx_rm/core/segment.py",
+                tool_name="Read",
+                tool_use_id="r1",
+                source_file="/awoc/src/ctx_rm/core/segment.py",
+            ),
+        ]
+        g = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        assert any(
+            e.kind == ReferenceEdgeKind.FILE_DISCOVERY
+            and e.source_seg_id == "tr_bash"
+            and e.target_seg_id == "tu_read"
+            for e in g.edges
+        )
+
+    def test_discovery_does_not_fire_on_substring_match(self) -> None:
+        segs = [
+            _seg(
+                "tr",
+                0,
+                0,
+                TraceSegmentKind.TOOL_RESULT,
+                "working in /awoc/src/ctx_rm directory",
+                tool_use_id="x",
+            ),
+            _seg(
+                "tu",
+                1,
+                1,
+                TraceSegmentKind.TOOL_USE,
+                "tool_use:Read file_path=/awoc/src/ctx_rm/core/segment.py",
+                tool_name="Read",
+                source_file="/awoc/src/ctx_rm/core/segment.py",
+            ),
+        ]
+        g = ReferenceGraph.build(_trace(segs), ReferenceMode.STRICT)
+        assert all(e.kind != ReferenceEdgeKind.FILE_DISCOVERY for e in g.edges)
+
+
 class TestLenientNgramEdge:
     def test_shared_ngram_creates_lenient_edge(self) -> None:
         shared = "async function dispatches worker threads across multiple queues"

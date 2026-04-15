@@ -154,6 +154,10 @@ class ReferenceEdgeKind(StrEnum):
     FILE_REREAD = "file_reread"
     EXACT_QUOTE = "exact_quote"
     NGRAM_OVERLAP = "ngram_overlap"
+    FILE_DISCOVERY = "file_discovery"
+
+
+_DISCOVERY_BOUNDARY_RE = re.compile(r"[^A-Za-z0-9._\-/]")
 
 
 @dataclass(frozen=True)
@@ -202,6 +206,7 @@ class ReferenceGraph:
         self._ambient_tokens: set[str] = set()
         self._build_ambient_index()
         self._rule_file_reread()
+        self._rule_file_discovery()
         self._rule_exact_quote()
         if self.mode == ReferenceMode.LENIENT:
             self._rule_ngram_overlap()
@@ -349,6 +354,48 @@ class ReferenceGraph:
                         if src.seg_id == s.seg_id:
                             continue
                         self._add_edge(src, s, ReferenceEdgeKind.FILE_REREAD)
+
+    def _rule_file_discovery(self) -> None:
+        """Edge when a later tool_use reads a path listed in an earlier tool_result.
+
+        For each later tool_use with a concrete source_file P, scan
+        earlier tool_result bodies for P appearing as a standalone token
+        (preceded and followed by non-path-char boundaries). One
+        discovery edge per target is enough to mark the listing as
+        referenced.
+        """
+        segs = self.trace.segments
+        for i, tgt in enumerate(segs):
+            if tgt.kind != TraceSegmentKind.TOOL_USE:
+                continue
+            p = tgt.source_file
+            if not self._is_concrete_file_path(p):
+                continue
+            for j in range(i):
+                src = segs[j]
+                if src.kind != TraceSegmentKind.TOOL_RESULT or not src.content:
+                    continue
+                if p not in src.content:
+                    continue
+                if self._path_is_standalone(p, src.content):
+                    self._add_edge(src, tgt, ReferenceEdgeKind.FILE_DISCOVERY)
+                    break
+
+    def _path_is_standalone(self, path: str, body: str) -> bool:
+        """Return True iff ``path`` appears in ``body`` at a non-path-char boundary."""
+        idx = 0
+        while True:
+            k = body.find(path, idx)
+            if k == -1:
+                return False
+            left_ok = k == 0 or bool(_DISCOVERY_BOUNDARY_RE.match(body[k - 1]))
+            right_end = k + len(path)
+            right_ok = right_end == len(body) or bool(
+                _DISCOVERY_BOUNDARY_RE.match(body[right_end])
+            )
+            if left_ok and right_ok:
+                return True
+            idx = k + 1
 
     def _rule_exact_quote(self) -> None:
         """Edges when a later message quotes a ≥20-char run from an earlier tool_result.
