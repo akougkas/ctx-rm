@@ -5,11 +5,12 @@ token worth stripping from quote content?". `strip_path_segments`
 replaces every path-like run inside a larger text with a single space
 so downstream substring/token matching does not see path noise.
 
-The regex matches runs that (a) contain at least one `/` separator,
-(b) have at least two segments, (c) end in a segment with a `.` or an
-extension-shaped suffix OR (d) start with `~/`, `./`, or `/`. It is
-deliberately loose because over-stripping path noise is preferable to
-missing it. The quote rule re-gates on other criteria.
+The regex matches runs that (a) start at a whitespace/quote/bracket
+boundary or at one of `= : , {` used in tool-arg serialization,
+(b) optionally begin with `~/`, `./`, `../`, or `/`, and (c) contain at
+least two `[A-Za-z0-9._-]+` segments joined by `/`. It is deliberately
+loose because we would rather over-strip path noise than miss it. The
+quote rule re-gates on other criteria.
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ import re
 # contain [A-Za-z0-9._-]+. Must contain at least one slash.
 _PATH_RE = re.compile(
     r"""
-    (?:^|(?<=[\s"'`(\[<]))          # start-of-line or whitespace/quote boundary
+    (?:^|(?<=[\s"'`(\[<=:,{]))      # start-of-line or whitespace/quote boundary
     (?:~/|\.{1,2}/|/)?              # optional ~/, ./, ../, /
     [A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+   # at least one / between segments
     """,

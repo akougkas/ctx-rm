@@ -43,3 +43,28 @@ class TestStripPathSegments:
         stripped = strip_path_segments(text)
         assert "file.py" not in stripped
         assert "other.ts" not in stripped
+
+    def test_strips_path_after_equals_sign(self) -> None:
+        text = "tool_use:Read file_path=/home/x/src/cli.ts limit=50"
+        stripped = strip_path_segments(text)
+        assert "/home/x/src/cli.ts" not in stripped
+        assert "cli.ts" not in stripped
+        assert "file_path=" in stripped  # boundary char preserved
+        assert "limit=50" in stripped    # unrelated key-value preserved
+
+    def test_strips_path_after_colon(self) -> None:
+        text = "error in src/foo.ts:42 during load"
+        stripped = strip_path_segments(text)
+        assert "src/foo.ts" not in stripped
+        assert "error in" in stripped
+        assert "during load" in stripped
+
+    def test_strips_path_after_comma(self) -> None:
+        text = "files: foo.py,/home/x/bar.py,baz.py"
+        stripped = strip_path_segments(text)
+        assert "/home/x/bar.py" not in stripped
+
+    def test_strips_path_in_curly_brace(self) -> None:
+        text = "template {/a/b/c.py} interpolated"
+        stripped = strip_path_segments(text)
+        assert "/a/b/c.py" not in stripped
