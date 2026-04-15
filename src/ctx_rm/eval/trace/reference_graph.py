@@ -177,6 +177,13 @@ class ReferenceGraph:
         return graph
 
     def _populate(self) -> None:
+        self._rule_file_reread()
+        self._rule_exact_quote()
+        if self.mode == ReferenceMode.LENIENT:
+            self._rule_ngram_overlap()
+
+    def _rule_file_reread(self) -> None:
+        """Rule: later tool_use of path P references earlier segments touching P."""
         segs = self.trace.segments
 
         # Index 1: file-path → indices of segments that touch that path.
@@ -211,6 +218,10 @@ class ReferenceGraph:
                         if src.seg_id == s.seg_id:
                             continue
                         self._add_edge(src, s, ReferenceEdgeKind.FILE_REREAD)
+
+    def _rule_exact_quote(self) -> None:
+        """Rule: later tool_use/assistant_text quotes a ≥20-char run from an earlier tool_result."""
+        segs = self.trace.segments
 
         # Rule 2: exact_quote. Build a lookup of long tokens from each
         # tool_result, then scan later tool_use / assistant_text bodies
@@ -257,45 +268,48 @@ class ReferenceGraph:
                                 self._add_edge(src, s, ReferenceEdgeKind.EXACT_QUOTE)
                             break
 
+    def _rule_ngram_overlap(self) -> None:
+        """Rule: lenient-only paraphrase catch via shared 5-token distinctive shingles."""
+        segs = self.trace.segments
+
         # Rule 3: ngram_overlap (lenient only). Build 5-token shingle sets
         # for every content-bearing segment and intersect pairwise with a
         # prefix index so we only compare plausible matches.
-        if self.mode == ReferenceMode.LENIENT:
-            shingles: dict[int, set[tuple[str, ...]]] = {}
-            prefix_index: dict[tuple[str, ...], list[int]] = defaultdict(list)
-            for i, s in enumerate(segs):
-                if s.kind in (
-                    TraceSegmentKind.SYSTEM,
-                    TraceSegmentKind.ASSISTANT_THINKING,
-                    TraceSegmentKind.ATTACHMENT,
-                ):
-                    continue
-                if not s.content:
-                    continue
-                sh = _compute_shingles(s.content)
-                if not sh:
-                    continue
-                shingles[i] = sh
-                # Index by first 2 tokens of each shingle for quick narrowing.
-                for tup in sh:
-                    prefix_index[tup[:2]].append(i)
+        shingles: dict[int, set[tuple[str, ...]]] = {}
+        prefix_index: dict[tuple[str, ...], list[int]] = defaultdict(list)
+        for i, s in enumerate(segs):
+            if s.kind in (
+                TraceSegmentKind.SYSTEM,
+                TraceSegmentKind.ASSISTANT_THINKING,
+                TraceSegmentKind.ATTACHMENT,
+            ):
+                continue
+            if not s.content:
+                continue
+            sh = _compute_shingles(s.content)
+            if not sh:
+                continue
+            shingles[i] = sh
+            # Index by first 2 tokens of each shingle for quick narrowing.
+            for tup in sh:
+                prefix_index[tup[:2]].append(i)
 
-            seen_pairs: set[tuple[int, int]] = set()
-            for i, target_sh in shingles.items():
-                candidates: set[int] = set()
-                for tup in target_sh:
-                    for j in prefix_index.get(tup[:2], ()):
-                        if j < i:
-                            candidates.add(j)
-                for j in candidates:
-                    if (j, i) in seen_pairs:
-                        continue
-                    seen_pairs.add((j, i))
-                    if shingles[j] & target_sh:
-                        src = segs[j]
-                        tgt = segs[i]
-                        if src.seg_id != tgt.seg_id:
-                            self._add_edge(src, tgt, ReferenceEdgeKind.NGRAM_OVERLAP)
+        seen_pairs: set[tuple[int, int]] = set()
+        for i, target_sh in shingles.items():
+            candidates: set[int] = set()
+            for tup in target_sh:
+                for j in prefix_index.get(tup[:2], ()):
+                    if j < i:
+                        candidates.add(j)
+            for j in candidates:
+                if (j, i) in seen_pairs:
+                    continue
+                seen_pairs.add((j, i))
+                if shingles[j] & target_sh:
+                    src = segs[j]
+                    tgt = segs[i]
+                    if src.seg_id != tgt.seg_id:
+                        self._add_edge(src, tgt, ReferenceEdgeKind.NGRAM_OVERLAP)
 
     def _add_edge(
         self,
