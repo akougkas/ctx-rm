@@ -1,0 +1,279 @@
+{
+  "corpus": "/home/akougkas/.claude/projects/-home-akougkas-projects-ctx-rm",
+  "project": "ctx-rm",
+  "n_traces": 5,
+  "aggregate_by_threshold": {
+    "500": {
+      "sum_bypassed_segments": 112,
+      "sum_bypassed_tokens": 249774,
+      "sum_bypassed_and_referenced_segments": 75,
+      "sum_bypassed_and_referenced_tokens": 189881,
+      "total_segments": 899,
+      "total_tokens": 382267,
+      "frac_segs_bypassed": 0.12458286985539488,
+      "frac_tokens_bypassed": 0.6534019415748679,
+      "frac_bypassed_are_referenced": 0.6696428571428571,
+      "frac_bypassed_tokens_are_referenced": 0.7602112309527813
+    },
+    "1000": {
+      "sum_bypassed_segments": 67,
+      "sum_bypassed_tokens": 216891,
+      "sum_bypassed_and_referenced_segments": 51,
+      "sum_bypassed_and_referenced_tokens": 172377,
+      "total_segments": 899,
+      "total_tokens": 382267,
+      "frac_segs_bypassed": 0.07452725250278086,
+      "frac_tokens_bypassed": 0.5673809143870645,
+      "frac_bypassed_are_referenced": 0.7611940298507462,
+      "frac_bypassed_tokens_are_referenced": 0.7947632681854019
+    },
+    "2000": {
+      "sum_bypassed_segments": 32,
+      "sum_bypassed_tokens": 170102,
+      "sum_bypassed_and_referenced_segments": 26,
+      "sum_bypassed_and_referenced_tokens": 139143,
+      "total_segments": 899,
+      "total_tokens": 382267,
+      "frac_segs_bypassed": 0.035595105672969966,
+      "frac_tokens_bypassed": 0.4449821721466933,
+      "frac_bypassed_are_referenced": 0.8125,
+      "frac_bypassed_tokens_are_referenced": 0.8179974368320184
+    },
+    "4000": {
+      "sum_bypassed_segments": 22,
+      "sum_bypassed_tokens": 140508,
+      "sum_bypassed_and_referenced_segments": 20,
+      "sum_bypassed_and_referenced_tokens": 121041,
+      "total_segments": 899,
+      "total_tokens": 382267,
+      "frac_segs_bypassed": 0.024471635150166853,
+      "frac_tokens_bypassed": 0.3675650788584942,
+      "frac_bypassed_are_referenced": 0.9090909090909091,
+      "frac_bypassed_tokens_are_referenced": 0.8614527286702537
+    },
+    "8000": {
+      "sum_bypassed_segments": 3,
+      "sum_bypassed_tokens": 33349,
+      "sum_bypassed_and_referenced_segments": 2,
+      "sum_bypassed_and_referenced_tokens": 20010,
+      "total_segments": 899,
+      "total_tokens": 382267,
+      "frac_segs_bypassed": 0.0033370411568409346,
+      "frac_tokens_bypassed": 0.08724007042198254,
+      "frac_bypassed_are_referenced": 0.6666666666666666,
+      "frac_bypassed_tokens_are_referenced": 0.6000179915439743
+    }
+  },
+  "per_trace": [
+    {
+      "trace_id": "15687993-bf94-4a35-85ee-2e5e190eb0f8",
+      "path": "/home/akougkas/.claude/projects/-home-akougkas-projects-ctx-rm/15687993-bf94-4a35-85ee-2e5e190eb0f8/subagents/agent-a0aa189c28825403b.jsonl",
+      "segments": 42,
+      "turns": 20,
+      "tokens": 77059,
+      "tool_result_count": 19,
+      "tool_result_tokens": 75014,
+      "referenced_segs": 35,
+      "bypass_by_threshold": {
+        "500": {
+          "bypassed_segments": 12,
+          "bypassed_tokens": 74810,
+          "bypassed_and_referenced_segments": 12,
+          "bypassed_and_referenced_tokens": 74810
+        },
+        "1000": {
+          "bypassed_segments": 12,
+          "bypassed_tokens": 74810,
+          "bypassed_and_referenced_segments": 12,
+          "bypassed_and_referenced_tokens": 74810
+        },
+        "2000": {
+          "bypassed_segments": 12,
+          "bypassed_tokens": 74810,
+          "bypassed_and_referenced_segments": 12,
+          "bypassed_and_referenced_tokens": 74810
+        },
+        "4000": {
+          "bypassed_segments": 12,
+          "bypassed_tokens": 74810,
+          "bypassed_and_referenced_segments": 12,
+          "bypassed_and_referenced_tokens": 74810
+        },
+        "8000": {
+          "bypassed_segments": 1,
+          "bypassed_tokens": 8298,
+          "bypassed_and_referenced_segments": 1,
+          "bypassed_and_referenced_tokens": 8298
+        }
+      }
+    },
+    {
+      "trace_id": "68e1be56-c100-43ef-8d88-86b218a307d4",
+      "path": "/home/akougkas/.claude/projects/-home-akougkas-projects-ctx-rm/68e1be56-c100-43ef-8d88-86b218a307d4/subagents/agent-a22beb2d20c4665f6.jsonl",
+      "segments": 88,
+      "turns": 37,
+      "tokens": 39092,
+      "tool_result_count": 37,
+      "tool_result_tokens": 31214,
+      "referenced_segs": 27,
+      "bypass_by_threshold": {
+        "500": {
+          "bypassed_segments": 27,
+          "bypassed_tokens": 29818,
+          "bypassed_and_referenced_segments": 17,
+          "bypassed_and_referenced_tokens": 21240
+        },
+        "1000": {
+          "bypassed_segments": 13,
+          "bypassed_tokens": 18718,
+          "bypassed_and_referenced_segments": 11,
+          "bypassed_and_referenced_tokens": 16242
+        },
+        "2000": {
+          "bypassed_segments": 1,
+          "bypassed_tokens": 2360,
+          "bypassed_and_referenced_segments": 1,
+          "bypassed_and_referenced_tokens": 2360
+        },
+        "4000": {
+          "bypassed_segments": 0,
+          "bypassed_tokens": 0,
+          "bypassed_and_referenced_segments": 0,
+          "bypassed_and_referenced_tokens": 0
+        },
+        "8000": {
+          "bypassed_segments": 0,
+          "bypassed_tokens": 0,
+          "bypassed_and_referenced_segments": 0,
+          "bypassed_and_referenced_tokens": 0
+        }
+      }
+    },
+    {
+      "trace_id": "68e1be56-c100-43ef-8d88-86b218a307d4",
+      "path": "/home/akougkas/.claude/projects/-home-akougkas-projects-ctx-rm/68e1be56-c100-43ef-8d88-86b218a307d4/subagents/agent-a3466d005509cfb2f.jsonl",
+      "segments": 75,
+      "turns": 28,
+      "tokens": 31455,
+      "tool_result_count": 31,
+      "tool_result_tokens": 24361,
+      "referenced_segs": 12,
+      "bypass_by_threshold": {
+        "500": {
+          "bypassed_segments": 15,
+          "bypassed_tokens": 22053,
+          "bypassed_and_referenced_segments": 5,
+          "bypassed_and_referenced_tokens": 9032
+        },
+        "1000": {
+          "bypassed_segments": 6,
+          "bypassed_tokens": 15681,
+          "bypassed_and_referenced_segments": 4,
+          "bypassed_and_referenced_tokens": 8339
+        },
+        "2000": {
+          "bypassed_segments": 2,
+          "bypassed_tokens": 10402,
+          "bypassed_and_referenced_segments": 1,
+          "bypassed_and_referenced_tokens": 4274
+        },
+        "4000": {
+          "bypassed_segments": 2,
+          "bypassed_tokens": 10402,
+          "bypassed_and_referenced_segments": 1,
+          "bypassed_and_referenced_tokens": 4274
+        },
+        "8000": {
+          "bypassed_segments": 0,
+          "bypassed_tokens": 0,
+          "bypassed_and_referenced_segments": 0,
+          "bypassed_and_referenced_tokens": 0
+        }
+      }
+    },
+    {
+      "trace_id": "68e1be56-c100-43ef-8d88-86b218a307d4",
+      "path": "/home/akougkas/.claude/projects/-home-akougkas-projects-ctx-rm/68e1be56-c100-43ef-8d88-86b218a307d4.jsonl",
+      "segments": 636,
+      "turns": 294,
+      "tokens": 173014,
+      "tool_result_count": 288,
+      "tool_result_tokens": 83695,
+      "referenced_segs": 207,
+      "bypass_by_threshold": {
+        "500": {
+          "bypassed_segments": 38,
+          "bypassed_tokens": 66458,
+          "bypassed_and_referenced_segments": 32,
+          "bypassed_and_referenced_tokens": 56865
+        },
+        "1000": {
+          "bypassed_segments": 23,
+          "bypassed_tokens": 56332,
+          "bypassed_and_referenced_segments": 19,
+          "bypassed_and_referenced_tokens": 48221
+        },
+        "2000": {
+          "bypassed_segments": 10,
+          "bypassed_tokens": 39814,
+          "bypassed_and_referenced_segments": 8,
+          "bypassed_and_referenced_tokens": 34573
+        },
+        "4000": {
+          "bypassed_segments": 4,
+          "bypassed_tokens": 20908,
+          "bypassed_and_referenced_segments": 4,
+          "bypassed_and_referenced_tokens": 20908
+        },
+        "8000": {
+          "bypassed_segments": 0,
+          "bypassed_tokens": 0,
+          "bypassed_and_referenced_segments": 0,
+          "bypassed_and_referenced_tokens": 0
+        }
+      }
+    },
+    {
+      "trace_id": "9cc80e1b-3f09-44a3-89b2-c84f21a6cfb1",
+      "path": "/home/akougkas/.claude/projects/-home-akougkas-projects-ctx-rm/9cc80e1b-3f09-44a3-89b2-c84f21a6cfb1/subagents/agent-ae7230c.jsonl",
+      "segments": 58,
+      "turns": 26,
+      "tokens": 61647,
+      "tool_result_count": 26,
+      "tool_result_tokens": 57377,
+      "referenced_segs": 12,
+      "bypass_by_threshold": {
+        "500": {
+          "bypassed_segments": 20,
+          "bypassed_tokens": 56635,
+          "bypassed_and_referenced_segments": 9,
+          "bypassed_and_referenced_tokens": 27934
+        },
+        "1000": {
+          "bypassed_segments": 13,
+          "bypassed_tokens": 51350,
+          "bypassed_and_referenced_segments": 5,
+          "bypassed_and_referenced_tokens": 24765
+        },
+        "2000": {
+          "bypassed_segments": 7,
+          "bypassed_tokens": 42716,
+          "bypassed_and_referenced_segments": 4,
+          "bypassed_and_referenced_tokens": 23126
+        },
+        "4000": {
+          "bypassed_segments": 4,
+          "bypassed_tokens": 34388,
+          "bypassed_and_referenced_segments": 3,
+          "bypassed_and_referenced_tokens": 21049
+        },
+        "8000": {
+          "bypassed_segments": 2,
+          "bypassed_tokens": 25051,
+          "bypassed_and_referenced_segments": 1,
+          "bypassed_and_referenced_tokens": 11712
+        }
+      }
+    }
+  ]
+}
