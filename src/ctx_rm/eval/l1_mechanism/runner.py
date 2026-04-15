@@ -15,6 +15,7 @@ oracle" is encapsulated here via `set_current_turn` hooks for the controls.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -76,6 +77,12 @@ class L1RunConfig:
     # Pin system prompts so they never get evicted. Makes the run compatible
     # with the runtime AgentLoop which pins system segments by default.
     pin_system: bool = True
+    # When True, raises the ContextBus admission threshold so no segment is
+    # routed directly to Warm. Forces every segment through Active, so L1
+    # measures eviction alone rather than admission + eviction. Required for
+    # the Phase B baseline runs on awoc where the default 2000-token bypass
+    # sent 59% of tool_result tokens straight past Active.
+    disable_bypass: bool = False
 
 
 @dataclass
@@ -139,12 +146,14 @@ def run_l1(config: L1RunConfig) -> L1Result:
         elif name == "recall":
             recalls.append((seg_id, current_turn))
 
+    admission_threshold = sys.maxsize if config.disable_bypass else 2000
     bus = ContextBus(
         token_budget=config.token_budget,
         store=store,
         policy=policy,
         scorer=config.scorer,
         headroom_ratio=config.headroom_ratio,
+        admission_threshold=admission_threshold,
         on_event=on_event,
     )
 

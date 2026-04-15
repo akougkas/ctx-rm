@@ -220,3 +220,77 @@ class TestMetricsBasics:
         assert 0.0 <= m.critical_segment_retention_k10 <= 1.0
         assert 0.0 <= m.eviction_precision <= 1.0
         assert 0.0 <= m.eviction_recall <= 1.0
+
+
+class TestDisableBypass:
+    def test_large_tool_result_bypasses_by_default(self) -> None:
+        large_body = "x " * 2500
+        trace = Trace(
+            trace_id="t",
+            source_path="mem",
+            project="p",
+            segments=[
+                TraceSegment(
+                    seg_id="u",
+                    turn_index=0,
+                    event_index=0,
+                    timestamp=0.0,
+                    kind=TraceSegmentKind.USER,
+                    content="hello world " * 20,
+                    token_count=50,
+                ),
+                TraceSegment(
+                    seg_id="tu",
+                    turn_index=0,
+                    event_index=1,
+                    timestamp=0.0,
+                    kind=TraceSegmentKind.TOOL_USE,
+                    content="tool_use:Read",
+                    token_count=10,
+                    tool_use_id="r1",
+                ),
+                TraceSegment(
+                    seg_id="tr",
+                    turn_index=0,
+                    event_index=2,
+                    timestamp=0.0,
+                    kind=TraceSegmentKind.TOOL_RESULT,
+                    content=large_body,
+                    token_count=2500,
+                    tool_use_id="r1",
+                ),
+                TraceSegment(
+                    seg_id="at",
+                    turn_index=1,
+                    event_index=3,
+                    timestamp=0.0,
+                    kind=TraceSegmentKind.ASSISTANT_TEXT,
+                    content="done",
+                    token_count=5,
+                ),
+            ],
+        )
+        graph = ReferenceGraph.build(trace, ReferenceMode.STRICT)
+        default = run_l1(
+            L1RunConfig(
+                trace=trace,
+                reference_graph=graph,
+                policy_factory=lambda g: LRUPolicy(),
+                policy_name="lru",
+                token_budget=100_000,
+            )
+        )
+        disabled = run_l1(
+            L1RunConfig(
+                trace=trace,
+                reference_graph=graph,
+                policy_factory=lambda g: LRUPolicy(),
+                policy_name="lru",
+                token_budget=100_000,
+                disable_bypass=True,
+            )
+        )
+        default_active = set(default.snapshots[-1].active_seg_ids)
+        disabled_active = set(disabled.snapshots[-1].active_seg_ids)
+        assert "tr" not in default_active
+        assert "tr" in disabled_active
