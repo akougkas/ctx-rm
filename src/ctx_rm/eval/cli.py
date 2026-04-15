@@ -98,6 +98,15 @@ def cmd_l1(
         None, "--json", help="Optional path to dump the full metric records as JSON"
     ),
     seed: int = typer.Option(0, "--seed", help="RNG seed for bootstrap + random policy"),
+    bypass_modes: str = typer.Option(
+        "both",
+        "--bypass-modes",
+        help=(
+            "Comma-separated subset of {on,off,both}. 'on' runs with the "
+            "default 2000-token admission bypass; 'off' raises the threshold "
+            "so every segment enters Active; 'both' emits one table per mode."
+        ),
+    ),
 ) -> None:
     """Run the L1 mechanism tier across a corpus and print a result table.
 
@@ -114,6 +123,15 @@ def cmd_l1(
         raise typer.Exit(code=2)
     budget_values = _parse_budgets(budgets)
     ref_mode = ReferenceMode(mode)
+
+    mode_tokens = _parse_csv(bypass_modes)
+    if "both" in mode_tokens:
+        bypass_values = ["on", "off"]
+    else:
+        bypass_values = [m for m in mode_tokens if m in ("on", "off")]
+    if not bypass_values:
+        console.print("[red]--bypass-modes must name at least one of on/off/both[/red]")
+        raise typer.Exit(code=2)
 
     console.print(f"[bold]Scanning {trace_dir}[/bold]")
     paths = discover_transcripts(trace_dir)
@@ -142,7 +160,7 @@ def cmd_l1(
         f"  using {len(traces_and_graphs)} traces (ref mode={ref_mode.value}, seed={seed})"
     )
 
-    rows: list[L1Metrics] = []
+    rows: list[tuple[str, L1Metrics]] = []
     for trace, graph in traces_and_graphs:
         for budget in budget_values:
             for name in policy_names:
@@ -153,89 +171,99 @@ def cmd_l1(
                 def _make(g, _f=factory, _b=budget):
                     return _f(g, _b)
 
-                cfg = L1RunConfig(
-                    trace=trace,
-                    reference_graph=graph,
-                    policy_factory=_make,
-                    policy_name=name,
-                    token_budget=budget,
-                    scorer=HeuristicScorer() if name == "budget" else None,
-                )
-                result = run_l1(cfg)
-                rows.append(compute_metrics(result, trace, graph))
+                for bypass in bypass_values:
+                    cfg = L1RunConfig(
+                        trace=trace,
+                        reference_graph=graph,
+                        policy_factory=_make,
+                        policy_name=name,
+                        token_budget=budget,
+                        scorer=HeuristicScorer() if name == "budget" else None,
+                        disable_bypass=(bypass == "off"),
+                    )
+                    result = run_l1(cfg)
+                    rows.append((bypass, compute_metrics(result, trace, graph)))
 
-    _print_table(rows, budget_values, policy_names, seed)
+    _print_table(rows, budget_values, policy_names, bypass_values, seed)
 
     if output_json is not None:
         output_json.parent.mkdir(parents=True, exist_ok=True)
         with output_json.open("w") as fh:
-            json.dump([r.as_row() for r in rows], fh, indent=2)
+            payload = [{"bypass": b, **m.as_row()} for b, m in rows]
+            json.dump(payload, fh, indent=2)
         console.print(f"\n[green]wrote {output_json}[/green]")
 
 
 def _print_table(
-    rows: list[L1Metrics],
+    rows: list[tuple[str, L1Metrics]],
     budgets: list[int],
     policies: list[str],
+    bypass_values: list[str],
     seed: int,
 ) -> None:
-    """Aggregate rows by (budget, policy) and print per-cell mean ± 95% CI."""
-    grouped: dict[tuple[int, str], list[L1Metrics]] = {}
-    for row in rows:
-        grouped.setdefault((row.token_budget, row.policy_name), []).append(row)
+    """Aggregate rows by (budget, policy, bypass) and print per-cell mean ± 95% CI."""
+    grouped: dict[tuple[int, str, str], list[L1Metrics]] = {}
+    for bypass, row in rows:
+        grouped.setdefault((row.token_budget, row.policy_name, bypass), []).append(row)
 
-    for budget in budgets:
-        table = Table(
-            title=f"L1 results  |  budget={budget}  |  bootstrap 95% CI (seed={seed})",
-            show_header=True,
-            header_style="bold",
-        )
-        table.add_column("policy", style="cyan")
-        table.add_column("n", justify="right")
-        table.add_column("precision", justify="right")
-        table.add_column("eviction recall", justify="right")
-        table.add_column("retention", justify="right")
-        table.add_column("retention@10", justify="right")
-        table.add_column("churn", justify="right")
-        table.add_column("tok_evc", justify="right")
-
-        for name in policies:
-            cell = grouped.get((budget, name), [])
-            if not cell:
-                continue
-            n = len(cell)
-            prec = bootstrap_mean_ci([c.eviction_precision for c in cell], seed=seed)
-            erec = bootstrap_mean_ci([c.eviction_recall for c in cell], seed=seed)
-            ret = bootstrap_mean_ci(
-                [c.critical_segment_retention for c in cell], seed=seed
+    for bypass in bypass_values:
+        for budget in budgets:
+            table = Table(
+                title=(
+                    f"L1 results  |  budget={budget}  |  bypass={bypass}  |  "
+                    f"bootstrap 95% CI (seed={seed})"
+                ),
+                show_header=True,
+                header_style="bold",
             )
-            ret10 = bootstrap_mean_ci(
-                [c.critical_segment_retention_k10 for c in cell], seed=seed
-            )
-            churn = bootstrap_mean_ci([c.churn_rate for c in cell], seed=seed)
-            tok_evc = bootstrap_mean_ci([float(c.tokens_evicted) for c in cell], seed=seed)
+            table.add_column("policy", style="cyan")
+            table.add_column("n", justify="right")
+            table.add_column("precision", justify="right")
+            table.add_column("eviction recall", justify="right")
+            table.add_column("retention", justify="right")
+            table.add_column("retention@10", justify="right")
+            table.add_column("churn", justify="right")
+            table.add_column("tok_evc", justify="right")
 
-            def fmt(ci, _n=n) -> str:
-                if _n < 3:
-                    return f"{ci.mean:.3f}"
-                return f"{ci.mean:.3f} [{ci.low:.3f}, {ci.high:.3f}]"
+            for name in policies:
+                cell = grouped.get((budget, name, bypass), [])
+                if not cell:
+                    continue
+                n = len(cell)
+                prec = bootstrap_mean_ci([c.eviction_precision for c in cell], seed=seed)
+                erec = bootstrap_mean_ci([c.eviction_recall for c in cell], seed=seed)
+                ret = bootstrap_mean_ci(
+                    [c.critical_segment_retention for c in cell], seed=seed
+                )
+                ret10 = bootstrap_mean_ci(
+                    [c.critical_segment_retention_k10 for c in cell], seed=seed
+                )
+                churn = bootstrap_mean_ci([c.churn_rate for c in cell], seed=seed)
+                tok_evc = bootstrap_mean_ci(
+                    [float(c.tokens_evicted) for c in cell], seed=seed
+                )
 
-            def fmt_int(ci, _n=n) -> str:
-                if _n < 3:
-                    return f"{int(ci.mean)}"
-                return f"{int(ci.mean)} [{int(ci.low)}, {int(ci.high)}]"
+                def fmt(ci, _n=n) -> str:
+                    if _n < 3:
+                        return f"{ci.mean:.3f}"
+                    return f"{ci.mean:.3f} [{ci.low:.3f}, {ci.high:.3f}]"
 
-            table.add_row(
-                name,
-                str(n),
-                fmt(prec),
-                fmt(erec),
-                fmt(ret),
-                fmt(ret10),
-                fmt(churn),
-                fmt_int(tok_evc),
-            )
-        console.print(table)
+                def fmt_int(ci, _n=n) -> str:
+                    if _n < 3:
+                        return f"{int(ci.mean)}"
+                    return f"{int(ci.mean)} [{int(ci.low)}, {int(ci.high)}]"
+
+                table.add_row(
+                    name,
+                    str(n),
+                    fmt(prec),
+                    fmt(erec),
+                    fmt(ret),
+                    fmt(ret10),
+                    fmt(churn),
+                    fmt_int(tok_evc),
+                )
+            console.print(table)
 
 
 def main() -> None:
